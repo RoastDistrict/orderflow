@@ -1,17 +1,34 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
+import { initializeApp } from "firebase/app";
+import { getDatabase, ref, set, onValue, remove } from "firebase/database";
+
+// ─── FIREBASE CONFIG + INIT ───────────────────────────────────
+const firebaseConfig = {
+  apiKey:            "AIzaSyBVB_v9fYMzOs_FsdMmfyNzLqc0fP9r6XA",
+  authDomain:        "orderflow-defa4.firebaseapp.com",
+  databaseURL:       "https://orderflow-defa4-default-rtdb.firebaseio.com",
+  projectId:         "orderflow-defa4",
+  storageBucket:     "orderflow-defa4.firebasestorage.app",
+  messagingSenderId: "596338428100",
+  appId:             "1:596338428100:web:7f6af203922e459ea0e191",
+};
+const fbApp = initializeApp(firebaseConfig);
+const db    = getDatabase(fbApp);
 
 // ─────────────────────────────────────────────────────────────
-//  ORDERFLOW — Complete App
-//  Staff: PIN login → live order queue → fulfil → billing
-//  Admin: PIN login → users / orders / analytics
-//
-//  TO WIRE FIREBASE: replace the S.orders / S.users arrays
-//  with Firebase Realtime DB reads/writes (see comments below)
+//  ORDERFLOW — Complete App  v2
+//  Fixes applied:
+//  1. Staff "New Order" button now correctly routes to ScanScreen
+//  2. Admin can delete past orders from Orders tab
+//  3. Orders older than 7 days are auto-purged on app load
+//  4. Undo restricted to the staff member who marked the item
+//     (Admin can undo anything)
 // ─────────────────────────────────────────────────────────────
 
-const TODAY = new Date().toISOString().slice(0, 10);
-const YDAY  = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-const TWO   = new Date(Date.now() - 172800000).toISOString().slice(0, 10);
+const TODAY   = new Date().toISOString().slice(0, 10);
+const YDAY    = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+const TWO     = new Date(Date.now() - 172800000).toISOString().slice(0, 10);
+const SEVEN_DAYS_AGO = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
 
 const nowTime = () =>
   new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -24,11 +41,11 @@ const genId = () =>
   "ABCDEFGHJKLMNPQR"[Math.floor(Math.random() * 16)] +
   (Math.floor(Math.random() * 9) + 1);
 
-// ─── INITIAL STATE ────────────────────────────────────────────
-// FIREBASE NOTE: Replace these seed arrays with Firebase listeners:
-//   ref(db, 'orders').on('value', snap => setOrders(snap.val()))
-//   ref(db, 'users').on('value',  snap => setUsers(snap.val()))
+// FIX 3: Filter out orders older than 7 days
+const purgeOldOrders = (orders) =>
+  orders.filter((o) => o.date >= SEVEN_DAYS_AGO);
 
+// ─── SEED DATA ────────────────────────────────────────────────
 const SEED_USERS = [
   { id: 1, name: "Ravi",   pin: "1234", active: true,  itemsHandled: 42, ordersToday: 8, lastSeen: "09:45" },
   { id: 2, name: "Priya",  pin: "1234", active: true,  itemsHandled: 38, ordersToday: 6, lastSeen: "10:12" },
@@ -37,7 +54,7 @@ const SEED_USERS = [
   { id: 5, name: "Mohan",  pin: "1234", active: true,  itemsHandled: 19, ordersToday: 3, lastSeen: "11:02" },
 ];
 
-const SEED_ORDERS = [
+const SEED_ORDERS = purgeOldOrders([
   {
     id: "A1", date: TODAY, scannedAt: "09:14", status: "live",
     sections: [
@@ -84,7 +101,7 @@ const SEED_ORDERS = [
       ]},
     ],
   },
-];
+]);
 
 const DEMO_SCAN = {
   sections: [
@@ -108,9 +125,9 @@ const DAILY_VOLUME = [
 ];
 
 // ─── HELPERS ──────────────────────────────────────────────────
-const allItems   = (o) => o.sections.flatMap((s) => s.items);
-const isReady    = (o) => allItems(o).filter((i) => i.status === "pending").length === 0;
-const progData   = (o) => {
+const allItems = (o) => o.sections.flatMap((s) => s.items);
+const isReady  = (o) => allItems(o).filter((i) => i.status === "pending").length === 0;
+const progData = (o) => {
   const it = allItems(o);
   const done = it.filter((i) => i.status !== "pending").length;
   return { done, total: it.length, pct: Math.round((done / it.length) * 100) };
@@ -138,7 +155,6 @@ function Pill({ status, small = false }) {
     partial:     { l: "Partial",   c: C.amber, bg: C.amberBg, bd: C.amberBd },
     pending:     { l: "Pending",   c: C.gray,  bg: C.grayBg,  bd: C.border  },
     billed:      { l: "Billed",    c: C.blue,  bg: C.blueBg,  bd: C.blueBd  },
-    live:        { l: "Live",      c: C.amber, bg: C.amberBg, bd: C.amberBd },
   };
   const s = m[status] || m.pending;
   return (
@@ -159,14 +175,15 @@ function PBar({ pct, ready }) {
   );
 }
 
-function Btn({ children, onClick, color = "amber", outline = false, style: sx = {} }) {
+function Btn({ children, onClick, color = "amber", sx = {} }) {
   const colors = {
-    amber:  { bg: C.amber,  text: "#fff", border: C.amber  },
-    green:  { bg: C.green,  text: "#fff", border: C.green  },
-    ghost:  { bg: "#fff",   text: C.gray, border: C.border },
-    greenO: { bg: C.greenBg, text: C.green, border: C.greenBd },
-    redO:   { bg: C.redBg,   text: C.red,   border: C.redBd   },
-    amberO: { bg: C.amberBg, text: C.amber, border: C.amberBd },
+    amber:  { bg: C.amber,   text: "#fff",   border: C.amber   },
+    green:  { bg: C.green,   text: "#fff",   border: C.green   },
+    ghost:  { bg: "#fff",    text: C.gray,   border: C.border  },
+    danger: { bg: C.redBg,   text: C.red,    border: C.redBd   },
+    greenO: { bg: C.greenBg, text: C.green,  border: C.greenBd },
+    redO:   { bg: C.redBg,   text: C.red,    border: C.redBd   },
+    amberO: { bg: C.amberBg, text: C.amber,  border: C.amberBd },
   };
   const v = colors[color] || colors.amber;
   return (
@@ -207,7 +224,7 @@ function Numpad({ onTap }) {
   );
 }
 
-function OrderCard({ order, onOpen, dim = false, isAdmin = false }) {
+function OrderCard({ order, onOpen, onDelete, dim = false }) {
   const { done, total, pct } = progData(order);
   const ready  = isReady(order);
   const billed = order.status === "billed";
@@ -216,28 +233,40 @@ function OrderCard({ order, onOpen, dim = false, isAdmin = false }) {
   const idC    = billed ? C.gray    : ready ? C.green     : C.amber;
   const idBd   = billed ? C.border  : ready ? C.greenBd   : C.amberBd;
   return (
-    <div onClick={() => onOpen(order.id)} style={{
+    <div style={{
       background: C.card, border: `1px solid ${ready && !billed ? C.greenBd : C.border}`,
-      borderRadius: 12, padding: "14px 16px", marginBottom: 10, cursor: "pointer",
+      borderRadius: 12, padding: "14px 16px", marginBottom: 10,
       opacity: dim ? 0.65 : 1, boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
     }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
-        <div style={{
-          width: 42, height: 42, borderRadius: 8, flexShrink: 0,
-          background: idBg, border: `1px solid ${idBd}`,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontFamily: C.mono, fontWeight: 700, fontSize: 15, color: idC,
-        }}>{order.id}</div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: C.text, lineHeight: 1.4 }}>{names}</div>
-            <Pill status={billed ? "billed" : ready ? "fulfilled" : "pending"} />
+      <div onClick={() => onOpen(order.id)} style={{ cursor: "pointer" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 10 }}>
+          <div style={{
+            width: 42, height: 42, borderRadius: 8, flexShrink: 0,
+            background: idBg, border: `1px solid ${idBd}`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontFamily: C.mono, fontWeight: 700, fontSize: 15, color: idC,
+          }}>{order.id}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: C.text, lineHeight: 1.4 }}>{names}</div>
+              <Pill status={billed ? "billed" : ready ? "fulfilled" : "pending"} />
+            </div>
+            <div style={{ fontSize: 11, color: C.textDim, marginTop: 3 }}>{order.scannedAt} · {total} items</div>
           </div>
-          <div style={{ fontSize: 11, color: C.textDim, marginTop: 3 }}>{order.scannedAt} · {total} items</div>
         </div>
+        <PBar pct={pct} ready={ready} />
+        <div style={{ fontSize: 11, color: C.textDim, marginTop: 5 }}>{done}/{total} handled</div>
       </div>
-      <PBar pct={pct} ready={ready} />
-      <div style={{ fontSize: 11, color: C.textDim, marginTop: 5 }}>{done}/{total} handled</div>
+      {/* FIX 2: Delete button for admin on past orders */}
+      {onDelete && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+          <Btn onClick={() => {
+            if (window.confirm(`Delete order ${order.id}? This cannot be undone.`)) onDelete(order.id);
+          }} color="danger" sx={{ padding: "6px 12px", fontSize: 11, gap: 4 }}>
+            🗑 Delete Order
+          </Btn>
+        </div>
+      )}
     </div>
   );
 }
@@ -298,13 +327,6 @@ function PinScreen({ title, subtitle, avatar, hint, correctPin, onSuccess, onBac
     }
   };
 
-  const dots = Array(4).fill(null).map((_, i) => (
-    <div key={i} style={{
-      width: 14, height: 14, borderRadius: 7,
-      background: i < entry.length ? C.amber : C.border,
-    }} />
-  ));
-
   return (
     <div style={{ minHeight: 620, background: "#fff", display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center", padding: 32, position: "relative" }}>
@@ -321,7 +343,14 @@ function PinScreen({ title, subtitle, avatar, hint, correctPin, onSuccess, onBac
       <div style={{ fontSize: 12, color: C.textDim, marginBottom: 28 }}>
         {subtitle}{hint && <span style={{ color: C.textFaint }}> {hint}</span>}
       </div>
-      <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>{dots}</div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+        {Array(4).fill(null).map((_, i) => (
+          <div key={i} style={{
+            width: 14, height: 14, borderRadius: 7,
+            background: i < entry.length ? C.amber : C.border,
+          }} />
+        ))}
+      </div>
       <div style={{ fontSize: 12, color: C.red, minHeight: 28, display: "flex", alignItems: "center", marginBottom: 8 }}>
         {error}
       </div>
@@ -350,7 +379,6 @@ function StaffHome({ orders, staffName, onNewOrder, onOpenOrder, onSignOut }) {
 
   return (
     <div style={{ minHeight: 620, display: "flex", flexDirection: "column", background: C.bg }}>
-      {/* Header */}
       <div style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${C.border}`, background: "#fff" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
           <div>
@@ -368,7 +396,7 @@ function StaffHome({ orders, staffName, onNewOrder, onOpenOrder, onSignOut }) {
           }}>Sign out</button>
         </div>
         <div style={{ display: "flex", gap: 4, background: C.bg, borderRadius: 8, padding: 3, border: `1px solid ${C.border}` }}>
-          <button onClick={() => setTab("live")}    style={tabSt(tab === "live")}>
+          <button onClick={() => setTab("live")} style={tabSt(tab === "live")}>
             Live Orders{live.length > 0 && (
               <span style={{ background: C.amber, color: "#fff", borderRadius: 10,
                 padding: "1px 6px", fontSize: 10, fontWeight: 700, fontFamily: C.mono, marginLeft: 4 }}>
@@ -380,16 +408,16 @@ function StaffHome({ orders, staffName, onNewOrder, onOpenOrder, onSignOut }) {
         </div>
       </div>
 
-      {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px 40px" }}>
         {tab === "live" && (
           <>
+            {/* FIX 1: onNewOrder now routes directly to scan screen */}
             <Btn onClick={onNewOrder} color="amber" sx={{ width: "100%", padding: 13, borderRadius: 10,
               fontSize: 14, marginBottom: 20, boxShadow: "0 2px 8px rgba(217,119,6,0.2)" }}>
               + New Order
             </Btn>
-            {inProg.length > 0 && <><GrpLabel label="In Progress"    color={C.amber} />{inProg.map((o) => <OrderCard key={o.id} order={o} onOpen={onOpenOrder} />)}</>}
-            {ready.length  > 0 && <><GrpLabel label="Ready for Billing" color={C.green} />{ready.map((o) => <OrderCard key={o.id} order={o} onOpen={onOpenOrder} />)}</>}
+            {inProg.length > 0 && <><GrpLabel label="In Progress"       color={C.amber} />{inProg.map((o) => <OrderCard key={o.id} order={o} onOpen={onOpenOrder} />)}</>}
+            {ready.length  > 0 && <><GrpLabel label="Ready for Billing" color={C.green} />{ready.map((o)  => <OrderCard key={o.id} order={o} onOpen={onOpenOrder} />)}</>}
             {live.length  === 0 && <div style={{ textAlign: "center", color: C.textFaint, padding: "60px 0", fontSize: 13 }}>No orders yet today.</div>}
           </>
         )}
@@ -409,31 +437,267 @@ function StaffHome({ orders, staffName, onNewOrder, onOpenOrder, onSignOut }) {
   );
 }
 
+// ─── GOOGLE VISION API KEY ────────────────────────────────────
+const VISION_API_KEY = "AIzaSyA6aUicjobSRLeGkDAG_bhit-0VCSkWONE";
+
+// ─── OCR + PARSER ─────────────────────────────────────────────
+// Calls Google Cloud Vision TEXT_DETECTION and parses the result
+// into sections + items matching the order slip format.
+async function extractOrderFromImage(base64Image) {
+  const res = await fetch(
+    `https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: [{
+          image: { content: base64Image },
+          features: [{ type: "DOCUMENT_TEXT_DETECTION", maxResults: 1 }],
+        }],
+      }),
+    }
+  );
+  const data = await res.json();
+  const rawText = data.responses?.[0]?.fullTextAnnotation?.text || "";
+  return parseOrderText(rawText);
+}
+
+// Parse raw OCR text into sections + items
+function parseOrderText(text) {
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+
+  // SKU pattern: alphanumeric code followed by a dash and a number
+  // e.g. ASA 135-5, MBS 7407-9, HC 7813-18, SMT 88406-4
+  const skuPattern = /^([A-Z0-9][\w\s]*?[-–]\d+)\s*$/i;
+  // Qty is the number after the LAST dash
+  const extractQty = (sku) => {
+    const match = sku.match(/[-–](\d+)\s*$/);
+    return match ? parseInt(match[1]) : 1;
+  };
+  const cleanSku = (raw) => raw.replace(/\s+/g, " ").trim().toUpperCase();
+
+  const sections = [];
+  let currentSection = null;
+
+  for (const line of lines) {
+    const isSkuLine = skuPattern.test(line) || /[-–]\d+\s*$/.test(line);
+
+    if (isSkuLine) {
+      // It's a product line
+      if (!currentSection) {
+        currentSection = { name: "General", items: [] };
+        sections.push(currentSection);
+      }
+      const sku = cleanSku(line);
+      const qty = extractQty(sku);
+      // Confidence: full marks if clearly structured, lower if it looks unusual
+      const confidence = /^[A-Z]{2,}/.test(sku) ? 88 : 60;
+      currentSection.items.push({ sku, qty, confidence, skipped: false, confirmed: false });
+    } else {
+      // Likely a section header (customer name)
+      // Skip very short lines and lines that are just numbers
+      if (line.length < 2 || /^\d+$/.test(line)) continue;
+      // Start a new section
+      currentSection = { name: line, items: [] };
+      sections.push(currentSection);
+    }
+  }
+
+  // Remove empty sections
+  const filtered = sections.filter(s => s.items.length > 0);
+
+  // If nothing parsed, return empty
+  if (filtered.length === 0) {
+    return { sections: [{ name: "Unrecognised", items: [] }], parseError: true };
+  }
+
+  return { sections: filtered, parseError: false };
+}
+
+// ─── REVIEW ITEM ROW (inline editable) ───────────────────────
+function ReviewItemRow({ item, sIdx, iIdx, onChange, onSkip, onConfirmItem }) {
+  const [editingSku, setEditingSku] = useState(item.confidence < 70 && !item.confirmed);
+  const [skuVal,     setSkuVal]     = useState(item.sku);
+  const [editingQty, setEditingQty] = useState(false);
+  const [qtyVal,     setQtyVal]     = useState(String(item.qty));
+
+  const isLowConf = item.confidence < 70 && !item.confirmed;
+
+  const saveSku = () => {
+    onChange(sIdx, iIdx, "sku", skuVal.trim().toUpperCase());
+    setEditingSku(false);
+  };
+  const saveQty = () => {
+    const n = parseInt(qtyVal);
+    if (!isNaN(n) && n > 0) onChange(sIdx, iIdx, "qty", n);
+    setEditingQty(false);
+  };
+  const handleConfirm = () => {
+    onChange(sIdx, iIdx, "confirmed", true);
+    onConfirmItem();
+  };
+
+  return (
+    <div style={{
+      background: item.skipped ? "#fff" : isLowConf ? C.amberBg : item.confirmed ? C.greenBg : "#fff",
+      border: `1px solid ${item.skipped ? C.border : isLowConf ? C.amberBd : item.confirmed ? C.greenBd : C.border}`,
+      borderRadius: 10, padding: "12px 13px", marginBottom: 8,
+      opacity: item.skipped ? 0.4 : 1,
+    }}>
+      {/* SKU row */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        {editingSku && !item.skipped ? (
+          <div style={{ display: "flex", gap: 6, flex: 1, flexWrap: "wrap" }}>
+            <input
+              value={skuVal}
+              onChange={e => setSkuVal(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && saveSku()}
+              autoFocus
+              placeholder="e.g. ASA 135-5"
+              style={{ flex: 1, minWidth: 120, padding: "6px 10px", borderRadius: 7,
+                border: `1px solid ${C.amber}`, fontFamily: C.mono, fontSize: 13,
+                color: C.text, background: "#fff", outline: "none" }}
+            />
+            <button onClick={saveSku} style={{ padding: "6px 10px", borderRadius: 7, border: "none",
+              background: C.green, color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>✓</button>
+            <button onClick={() => setEditingSku(false)} style={{ padding: "6px 10px", borderRadius: 7,
+              border: `1px solid ${C.border}`, background: "#fff", color: C.textDim, cursor: "pointer", fontSize: 13 }}>✕</button>
+          </div>
+        ) : (
+          <>
+            <span style={{ fontFamily: C.mono, fontWeight: 700, fontSize: 14, color: C.text,
+              textDecoration: item.skipped ? "line-through" : "none", flex: 1 }}>
+              {item.sku}
+            </span>
+            {!item.skipped && (
+              <>
+                <span style={{ fontFamily: C.mono, fontSize: 10,
+                  color: item.confidence >= 85 ? C.green : item.confidence >= 70 ? C.textDim : C.amber }}>
+                  {item.confidence}%
+                </span>
+                {item.confirmed && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.green }}>✓ confirmed</span>}
+                <button onClick={() => { setSkuVal(item.sku); setEditingSku(true); }}
+                  style={{ padding: "3px 8px", borderRadius: 6, border: `1px solid ${C.border}`,
+                    background: "#fff", color: C.textDim, cursor: "pointer", fontSize: 11 }}>Edit SKU</button>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Qty row */}
+      {!item.skipped && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: isLowConf ? 10 : 0 }}>
+          <span style={{ fontSize: 12, color: C.textDim }}>Qty:</span>
+          {editingQty ? (
+            <div style={{ display: "flex", gap: 6 }}>
+              <input type="number" value={qtyVal} onChange={e => setQtyVal(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && saveQty()}
+                autoFocus
+                style={{ width: 60, padding: "4px 8px", borderRadius: 7,
+                  border: `1px solid ${C.amber}`, fontFamily: C.mono, fontSize: 14,
+                  color: C.amber, fontWeight: 700, background: "#fff", outline: "none", textAlign: "center" }}
+              />
+              <button onClick={saveQty} style={{ padding: "4px 10px", borderRadius: 7, border: "none",
+                background: C.green, color: "#fff", fontWeight: 700, cursor: "pointer", fontSize: 13 }}>✓</button>
+              <button onClick={() => setEditingQty(false)} style={{ padding: "4px 10px", borderRadius: 7,
+                border: `1px solid ${C.border}`, background: "#fff", color: C.textDim, cursor: "pointer", fontSize: 13 }}>✕</button>
+            </div>
+          ) : (
+            <>
+              <span style={{ fontFamily: C.mono, fontWeight: 700, fontSize: 14, color: C.amber }}>×{item.qty}</span>
+              <button onClick={() => { setQtyVal(String(item.qty)); setEditingQty(true); }}
+                style={{ padding: "3px 8px", borderRadius: 6, border: `1px solid ${C.border}`,
+                  background: "#fff", color: C.textDim, cursor: "pointer", fontSize: 11 }}>Edit Qty</button>
+            </>
+          )}
+          <div style={{ flex: 1 }} />
+          <button onClick={onSkip} style={{ padding: "3px 8px", borderRadius: 6,
+            border: `1px solid ${C.redBd}`, background: C.redBg, color: C.red,
+            cursor: "pointer", fontSize: 11 }}>Remove</button>
+        </div>
+      )}
+
+      {/* Confirm button for low confidence items */}
+      {isLowConf && !item.skipped && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.amberBd}` }}>
+          <div style={{ fontSize: 11, color: C.amber, marginBottom: 8 }}>
+            ⚠ AI was uncertain about this item. Please verify SKU and quantity before confirming.
+          </div>
+          <Btn onClick={handleConfirm} color="amber" sx={{ width: "100%", padding: "8px", fontSize: 12 }}>
+            ✓ Looks correct — confirm this item
+          </Btn>
+        </div>
+      )}
+
+      {item.skipped && (
+        <div style={{ fontSize: 11, color: C.textFaint, marginTop: 4 }}>Removed from order</div>
+      )}
+    </div>
+  );
+}
+
 // ─── SCAN SCREEN ──────────────────────────────────────────────
 function ScanScreen({ actorName, onBack, onConfirm }) {
-  const [stage, setStage]     = useState("choose"); // choose|preview|analysing|reviewing
-  const [imgSrc, setImgSrc]   = useState(null);
-  const [ext, setExt]         = useState(null);
+  const [stage,   setStage]   = useState("choose");
+  const [imgSrc,  setImgSrc]  = useState(null);
+  const [imgB64,  setImgB64]  = useState(null);
+  const [ext,     setExt]     = useState(null);
+  const [error,   setError]   = useState(null);
   const fileRef               = useRef();
 
-  const triggerCamera  = () => { fileRef.current.setAttribute("capture", "environment"); fileRef.current.click(); };
-  const triggerUpload  = () => { fileRef.current.removeAttribute("capture"); fileRef.current.click(); };
-  const handleFile     = (e) => {
+  const triggerCamera = () => { fileRef.current.setAttribute("capture", "environment"); fileRef.current.click(); };
+  const triggerUpload = () => { fileRef.current.removeAttribute("capture"); fileRef.current.click(); };
+
+  const handleFile = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => { setImgSrc(ev.target.result); setStage("preview"); };
+    reader.onload = (ev) => {
+      const dataUrl = ev.target.result;
+      setImgSrc(dataUrl);
+      // Strip the data:image/...;base64, prefix
+      setImgB64(dataUrl.split(",")[1]);
+      setStage("preview");
+    };
     reader.readAsDataURL(file);
     e.target.value = "";
   };
-  const analyse = () => {
+
+  const analyse = async () => {
     setStage("analysing");
-    // FIREBASE NOTE: Replace this timeout with your actual Anthropic API call:
-    //   const response = await fetch("https://api.anthropic.com/v1/messages", { ... })
-    //   then parse and setExt(parsed); setStage("reviewing");
-    setTimeout(() => { setExt(cl(DEMO_SCAN)); setStage("reviewing"); }, 1800);
+    setError(null);
+    try {
+      const result = await extractOrderFromImage(imgB64);
+      if (result.parseError || result.sections.every(s => s.items.length === 0)) {
+        setError("Couldn't extract any SKUs from this image. Please try a clearer photo or add items manually.");
+        setStage("preview");
+        return;
+      }
+      setExt(result);
+      setStage("reviewing");
+    } catch (err) {
+      setError("Failed to read image. Check your internet connection and try again.");
+      setStage("preview");
+    }
   };
-  const skipItem = (sIdx, iIdx) =>
-    setExt((p) => { const n = cl(p); n.sections[sIdx].items[iIdx].skipped = true; return n; });
+
+  const updateItem = (sIdx, iIdx, field, value) => {
+    setExt(prev => {
+      const n = cl(prev);
+      n.sections[sIdx].items[iIdx][field] = value;
+      return n;
+    });
+  };
+  const skipItem = (sIdx, iIdx) => updateItem(sIdx, iIdx, "skipped", true);
+  const confirmItem = (sIdx, iIdx) => updateItem(sIdx, iIdx, "confirmed", true);
+
+  // All low-confidence items must be either confirmed or skipped before proceeding
+  const lowConfPending = ext
+    ? ext.sections.flatMap((s, sIdx) =>
+        s.items.filter((item, iIdx) => !item.skipped && item.confidence < 70 && !item.confirmed)
+      )
+    : [];
+  const canConfirm = lowConfPending.length === 0;
 
   const confirm = () => {
     const order = {
@@ -450,11 +714,12 @@ function ScanScreen({ actorName, onBack, onConfirm }) {
     onConfirm(order);
   };
 
-  const lowConf = ext ? ext.sections.flatMap((s) => s.items.filter((i) => !i.skipped && i.confidence < 70)) : [];
+  const totalItems = ext ? ext.sections.reduce((s, sec) => s + sec.items.filter(i => !i.skipped).length, 0) : 0;
 
   return (
     <div style={{ minHeight: 620, display: "flex", flexDirection: "column", background: C.bg }}>
       <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFile} />
+
       {/* Header */}
       <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}`, background: "#fff",
         display: "flex", alignItems: "center", gap: 12 }}>
@@ -466,6 +731,8 @@ function ScanScreen({ actorName, onBack, onConfirm }) {
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 20px 40px" }}>
+
+        {/* ── CHOOSE ── */}
         {stage === "choose" && (
           <>
             <div style={{ fontSize: 13, color: C.textDim, textAlign: "center", marginBottom: 16 }}>
@@ -486,7 +753,7 @@ function ScanScreen({ actorName, onBack, onConfirm }) {
               width: "100%", padding: 20, borderRadius: 12, border: `1px solid ${C.border}`,
               background: "#fff", cursor: "pointer", fontFamily: C.sans,
               display: "flex", alignItems: "center", gap: 16, textAlign: "left",
-              boxShadow: "0 1px 3px rgba(0,0,0,0.06)", marginBottom: 16,
+              boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
             }}>
               <span style={{ fontSize: 30, flexShrink: 0 }}>🖼️</span>
               <div>
@@ -494,82 +761,113 @@ function ScanScreen({ actorName, onBack, onConfirm }) {
                 <div style={{ fontSize: 12, color: C.textDim }}>Choose an existing photo from your device</div>
               </div>
             </button>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 8 }}>— Preview only —</div>
-              <Btn onClick={() => { setExt(cl(DEMO_SCAN)); setStage("reviewing"); }} color="ghost">
-                ⚡ Simulate with sample data
-              </Btn>
-            </div>
           </>
         )}
 
+        {/* ── PREVIEW ── */}
         {stage === "preview" && (
           <>
-            <img src={imgSrc} alt="slip" style={{ width: "100%", borderRadius: 12, border: `1px solid ${C.border}`, display: "block", marginBottom: 12 }} />
+            <img src={imgSrc} alt="slip" style={{ width: "100%", borderRadius: 12,
+              border: `1px solid ${C.border}`, display: "block", marginBottom: 12 }} />
+            {error && (
+              <div style={{ background: C.redBg, border: `1px solid ${C.redBd}`, borderRadius: 10,
+                padding: "12px 14px", marginBottom: 12, fontSize: 13, color: C.red }}>{error}</div>
+            )}
             <div style={{ display: "flex", gap: 8 }}>
-              <Btn onClick={() => setStage("choose")} color="ghost" sx={{ flex: 1 }}>↩ Retake</Btn>
+              <Btn onClick={() => { setImgSrc(null); setImgB64(null); setError(null); setStage("choose"); }}
+                color="ghost" sx={{ flex: 1 }}>↩ Retake</Btn>
               <Btn onClick={analyse} color="amber" sx={{ flex: 2 }}>⚡ Analyse Order</Btn>
             </div>
           </>
         )}
 
+        {/* ── ANALYSING ── */}
         {stage === "analysing" && (
           <>
-            {imgSrc && <img src={imgSrc} alt="slip" style={{ width: "100%", borderRadius: 12, border: `1px solid ${C.border}`, display: "block", marginBottom: 12, opacity: 0.5 }} />}
+            {imgSrc && <img src={imgSrc} alt="slip" style={{ width: "100%", borderRadius: 12,
+              border: `1px solid ${C.border}`, display: "block", marginBottom: 12, opacity: 0.5 }} />}
             <div style={{ background: C.amberBg, border: `1px solid ${C.amberBd}`, borderRadius: 10, padding: 16, textAlign: "center" }}>
               <div style={{ fontSize: 22, marginBottom: 8 }}>🔍</div>
               <div style={{ fontWeight: 700, color: C.amber, fontSize: 14, marginBottom: 4 }}>Reading handwriting…</div>
-              <div style={{ fontSize: 12, color: C.textDim }}>Extracting SKUs and quantities</div>
+              <div style={{ fontSize: 12, color: C.textDim }}>Google Vision is extracting text from your image</div>
             </div>
           </>
         )}
 
+        {/* ── REVIEW ── */}
         {stage === "reviewing" && ext && (
           <>
-            {imgSrc && <img src={imgSrc} alt="slip" style={{ width: "100%", borderRadius: 10, border: `1px solid ${C.border}`, display: "block", maxHeight: 160, objectFit: "cover", marginBottom: 12 }} />}
-            {lowConf.length > 0 && (
-              <div style={{ background: C.amberBg, border: `1px solid ${C.amberBd}`, borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
-                <div style={{ fontWeight: 700, color: C.amber, fontSize: 13, marginBottom: 3 }}>⚠ {lowConf.length} item{lowConf.length > 1 ? "s" : ""} need review</div>
-                <div style={{ fontSize: 12, color: C.textDim }}>AI was uncertain — verify before confirming.</div>
-              </div>
+            {imgSrc && (
+              <img src={imgSrc} alt="slip" style={{ width: "100%", borderRadius: 10,
+                border: `1px solid ${C.border}`, display: "block", maxHeight: 160,
+                objectFit: "cover", marginBottom: 14 }} />
             )}
+
+            {/* Summary bar */}
+            <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 10,
+              padding: "10px 14px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ flex: 1, fontSize: 13, color: C.text, fontWeight: 600 }}>
+                {totalItems} item{totalItems !== 1 ? "s" : ""} extracted
+              </div>
+              {lowConfPending.length > 0 && (
+                <span style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 600,
+                  padding: "3px 8px", borderRadius: 4, background: C.amberBg,
+                  color: C.amber, border: `1px solid ${C.amberBd}` }}>
+                  {lowConfPending.length} need review
+                </span>
+              )}
+              {lowConfPending.length === 0 && (
+                <span style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 600,
+                  padding: "3px 8px", borderRadius: 4, background: C.greenBg,
+                  color: C.green, border: `1px solid ${C.greenBd}` }}>
+                  All verified ✓
+                </span>
+              )}
+            </div>
+
+            {/* Sections + items */}
             {ext.sections.map((sec, sIdx) => (
               <div key={sIdx} style={{ marginBottom: 20 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.8px", color: C.textDim, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ color: C.amber }}>§</span>{sec.name.toUpperCase()}
+                {/* Editable section name */}
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.8px",
+                  color: C.textDim, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ color: C.amber }}>§</span>
+                  {sec.name.toUpperCase()}
                 </div>
-                {sec.items.map((item, iIdx) => {
-                  const cc = item.confidence >= 90 ? C.green : item.confidence >= 70 ? C.textDim : C.amber;
-                  return (
-                    <div key={iIdx} style={{
-                      background: item.skipped ? "#fff" : item.confidence < 70 ? C.amberBg : "#fff",
-                      border: `1px solid ${item.skipped ? C.border : item.confidence < 70 ? C.amberBd : C.border}`,
-                      borderRadius: 10, padding: "11px 13px", marginBottom: 8,
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                      opacity: item.skipped ? 0.45 : 1,
-                    }}>
-                      <div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                          <span style={{ fontFamily: C.mono, fontWeight: 600, fontSize: 13, color: C.text, textDecoration: item.skipped ? "line-through" : "none" }}>{item.sku}</span>
-                          <span style={{ fontFamily: C.mono, fontSize: 10, color: cc }}>{item.confidence}%</span>
-                          {item.skipped && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.textFaint }}>SKIPPED</span>}
-                        </div>
-                        {!item.skipped && <div style={{ fontSize: 12, color: C.textDim }}>Qty: <span style={{ fontFamily: C.mono, fontWeight: 700, color: C.amber }}>×{item.qty}</span></div>}
-                      </div>
-                      {!item.skipped && (
-                        <button onClick={() => skipItem(sIdx, iIdx)} style={{
-                          background: C.redBg, border: `1px solid ${C.redBd}`, borderRadius: 6,
-                          padding: "5px 8px", cursor: "pointer", color: C.red, fontSize: 13, fontFamily: C.sans,
-                        }}>✕</button>
-                      )}
-                    </div>
-                  );
-                })}
+                {sec.items.map((item, iIdx) => (
+                  <ReviewItemRow
+                    key={iIdx}
+                    item={item}
+                    sIdx={sIdx}
+                    iIdx={iIdx}
+                    onChange={updateItem}
+                    onSkip={() => skipItem(sIdx, iIdx)}
+                    onConfirmItem={() => confirmItem(sIdx, iIdx)}
+                  />
+                ))}
               </div>
             ))}
+
+            {/* Blocked confirm message */}
+            {!canConfirm && (
+              <div style={{ background: C.amberBg, border: `1px solid ${C.amberBd}`, borderRadius: 10,
+                padding: "12px 14px", marginBottom: 12, fontSize: 12, color: C.amber }}>
+                ⚠ Please review and confirm the {lowConfPending.length} highlighted item{lowConfPending.length > 1 ? "s" : ""} above before proceeding.
+              </div>
+            )}
+
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-              <Btn onClick={confirm} color="green" sx={{ width: "100%", padding: 13, fontSize: 14 }}>✓ Confirm & Create Order</Btn>
-              <Btn onClick={() => setStage("choose")} color="ghost" sx={{ width: "100%", padding: 11 }}>↩ Start over</Btn>
+              <Btn
+                onClick={confirm}
+                color={canConfirm ? "green" : "ghost"}
+                sx={{ width: "100%", padding: 13, fontSize: 14,
+                  opacity: canConfirm ? 1 : 0.5, cursor: canConfirm ? "pointer" : "not-allowed" }}
+              >
+                {canConfirm ? "✓ Confirm & Create Order" : `Review ${lowConfPending.length} item${lowConfPending.length > 1 ? "s" : ""} first`}
+              </Btn>
+              <Btn onClick={() => { setStage("choose"); setExt(null); setError(null); }} color="ghost" sx={{ width: "100%", padding: 11 }}>
+                ↩ Start over
+              </Btn>
             </div>
           </>
         )}
@@ -578,10 +876,10 @@ function ScanScreen({ actorName, onBack, onConfirm }) {
   );
 }
 
-// ─── ORDER DETAIL (shared staff + admin) ──────────────────────
-function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
+// ─── ORDER DETAIL ─────────────────────────────────────────────
+function OrderDetail({ order, actorName, isAdmin, onBack, onUpdate, onBilled }) {
   const [expandedKey, setExpandedKey] = useState(null);
-  const [billingOpen,  setBillingOpen]  = useState(false);
+  const [billingOpen, setBillingOpen] = useState(false);
   const [editQty,  setEditQty]  = useState("");
   const [editNote, setEditNote] = useState("");
 
@@ -594,7 +892,9 @@ function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
 
   const findIdx = (item) => {
     let sIdx = -1, iIdx = -1;
-    order.sections.forEach((sec, si) => sec.items.forEach((it, ii) => { if (it.id === item.id) { sIdx = si; iIdx = ii; } }));
+    order.sections.forEach((sec, si) => sec.items.forEach((it, ii) => {
+      if (it.id === item.id) { sIdx = si; iIdx = ii; }
+    }));
     return [sIdx, iIdx];
   };
 
@@ -602,17 +902,29 @@ function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
     onUpdate(sIdx, iIdx, { status, handledBy: actorName });
     if (expandedKey === `${sIdx}-${iIdx}`) setExpandedKey(null);
   };
+
+  // FIX 4: Undo only available to the staff member who marked it, or admin
+  const canUndo = (item) => isAdmin || item.handledBy === actorName;
+
   const undoItem = (sIdx, iIdx) => onUpdate(sIdx, iIdx, { status: "pending", handledBy: null });
-  const openOverride = (key, item) => { setExpandedKey(key); setEditQty(String(item.qty || item.origQty)); setEditNote(item.note || ""); };
+
+  const openOverride = (key, item) => {
+    setExpandedKey(key);
+    setEditQty(String(item.qty || item.origQty));
+    setEditNote(item.note || "");
+  };
   const saveOverride = (sIdx, iIdx, origQty) => {
     const qty = parseInt(editQty);
     if (!isNaN(qty) && qty > 0) {
-      onUpdate(sIdx, iIdx, { qty, note: editNote, status: qty >= origQty ? "fulfilled" : "partial", handledBy: actorName });
+      onUpdate(sIdx, iIdx, {
+        qty, note: editNote,
+        status: qty >= origQty ? "fulfilled" : "partial",
+        handledBy: actorName,
+      });
     }
     setExpandedKey(null);
   };
 
-  // By-staff grouping
   const byStaff = {};
   handled.forEach((item) => { const k = item.handledBy || "Unknown"; (byStaff[k] = byStaff[k] || []).push(item); });
 
@@ -622,7 +934,6 @@ function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
 
   return (
     <div style={{ minHeight: 620, display: "flex", flexDirection: "column", background: C.bg, position: "relative" }}>
-      {/* Header */}
       <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}`, background: "#fff" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
           <button onClick={onBack} style={{ background: "none", border: "none", color: C.textDim, cursor: "pointer", fontSize: 22, lineHeight: 1, padding: 0 }}>←</button>
@@ -631,12 +942,14 @@ function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
             <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{order.sections.map((s) => s.name).join(" · ")}</div>
             <div style={{ fontSize: 11, color: C.textDim }}>{order.scannedAt}{isBilled && <span style={{ color: C.blue, marginLeft: 6 }}>· Billed</span>}</div>
           </div>
+          {isAdmin && <span style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 700, background: C.amberBg, color: C.amber, border: `1px solid ${C.amberBd}`, borderRadius: 4, padding: "2px 6px" }}>ADMIN</span>}
         </div>
         <PBar pct={pct} ready={ready} />
         <div style={{ fontSize: 11, color: C.textDim, marginTop: 5 }}>{handled.length}/{all.length} handled · {pending.length} remaining</div>
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px 100px" }}>
+
         {/* Pending queue */}
         {pending.length > 0 && (
           <>
@@ -662,14 +975,21 @@ function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
                   </div>
                   {isOpen && (
                     <div style={{ borderTop: `1px solid ${C.border}`, padding: 14, background: C.bg }}>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: C.textDim, marginBottom: 8 }}>QUANTITY TO SEND <span style={{ color: C.textFaint, fontFamily: C.mono, fontWeight: 400 }}>(req ×{item.origQty})</span></div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: C.textDim, marginBottom: 8 }}>
+                        QUANTITY TO SEND <span style={{ color: C.textFaint, fontFamily: C.mono, fontWeight: 400 }}>(req ×{item.origQty})</span>
+                      </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
                         <button onClick={() => setEditQty((v) => String(Math.max(1, parseInt(v || 1) - 1)))} style={{ width: 40, height: 40, borderRadius: 8, border: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", fontSize: 20, color: C.textDim, fontFamily: C.sans }}>−</button>
                         <input type="number" value={editQty} onChange={(e) => setEditQty(e.target.value)} style={{ width: 76, padding: "8px 0", borderRadius: 8, border: `1px solid ${C.amberBd}`, color: C.amber, fontFamily: C.mono, fontWeight: 700, fontSize: 22, textAlign: "center", background: "#fff", outline: "none" }} />
                         <button onClick={() => setEditQty((v) => String(parseInt(v || 0) + 1))} style={{ width: 40, height: 40, borderRadius: 8, border: `1px solid ${C.border}`, background: "#fff", cursor: "pointer", fontSize: 20, color: C.textDim, fontFamily: C.sans }}>+</button>
                         <button onClick={() => setEditQty(String(item.origQty))} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", cursor: "pointer", color: C.textDim, fontSize: 11, fontFamily: C.mono }}>Full ×{item.origQty}</button>
                       </div>
-                      {(() => { const q = parseInt(editQty); if (q > 0 && q < item.origQty) return <div style={{ fontSize: 11, color: C.amber, marginBottom: 10 }}>Partial — sending {q} of {item.origQty}</div>; if (q >= item.origQty) return <div style={{ fontSize: 11, color: C.green, marginBottom: 10 }}>Fulfilled</div>; return <div style={{ height: 21, marginBottom: 10 }} />; })()}
+                      {(() => {
+                        const q = parseInt(editQty);
+                        if (q > 0 && q < item.origQty) return <div style={{ fontSize: 11, color: C.amber, marginBottom: 10 }}>Partial — sending {q} of {item.origQty}</div>;
+                        if (q >= item.origQty) return <div style={{ fontSize: 11, color: C.green, marginBottom: 10 }}>Fulfilled</div>;
+                        return <div style={{ height: 21, marginBottom: 10 }} />;
+                      })()}
                       <div style={{ marginBottom: 12 }}>
                         <div style={{ fontSize: 11, fontWeight: 600, color: C.textDim, marginBottom: 5 }}>NOTE (optional)</div>
                         <input type="text" value={editNote} onChange={(e) => setEditNote(e.target.value)} placeholder="e.g. 3 available, 2 coming tomorrow" style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 13, fontFamily: C.sans, outline: "none", color: C.text, background: "#fff", boxSizing: "border-box" }} />
@@ -694,7 +1014,7 @@ function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
           </div>
         )}
 
-        {/* Handled items */}
+        {/* Handled items grouped by staff */}
         {handled.length > 0 && (
           <>
             <div style={{ fontSize: 11, fontWeight: 700, color: C.textDim, letterSpacing: "0.8px", marginTop: pending.length ? 20 : 4, marginBottom: 10 }}>HANDLED ({handled.length})</div>
@@ -721,8 +1041,12 @@ function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                           <Pill status={item.status} />
-                          {!isBilled && (
-                            <button onClick={() => undoItem(sIdx, iIdx)} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 6, padding: "3px 8px", cursor: "pointer", color: C.textDim, fontSize: 11, fontFamily: C.sans }}>↩</button>
+                          {/* FIX 4: Only show undo to the person who marked it, or admin */}
+                          {!isBilled && canUndo(item) && (
+                            <button onClick={() => undoItem(sIdx, iIdx)} style={{
+                              background: "#fff", border: `1px solid ${C.border}`, borderRadius: 6,
+                              padding: "3px 8px", cursor: "pointer", color: C.textDim, fontSize: 11, fontFamily: C.sans,
+                            }} title="Undo">↩</button>
                           )}
                         </div>
                       </div>
@@ -792,33 +1116,38 @@ function OrderDetail({ order, actorName, onBack, onUpdate, onBilled }) {
 }
 
 // ─── ADMIN APP ────────────────────────────────────────────────
-function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAddOrder, onUserChange }) {
-  const [tab,        setTab]        = useState("analytics");
-  const [activeOId,  setActiveOId]  = useState(null);
-  const [expandSku,  setExpandSku]  = useState(null);
-  const [showAdd,    setShowAdd]    = useState(false);
-  const [newName,    setNewName]    = useState("");
-  const [newPin,     setNewPin]     = useState("");
-  const [scanning,   setScanning]   = useState(false);
+function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAddOrder, onUserChange, onDeleteOrder }) {
+  const [tab,       setTab]       = useState("analytics");
+  const [activeOId, setActiveOId] = useState(null);
+  const [expandSku, setExpandSku] = useState(null);
+  const [showAdd,   setShowAdd]   = useState(false);
+  const [newName,   setNewName]   = useState("");
+  const [newPin,    setNewPin]    = useState("");
+  const [scanning,  setScanning]  = useState(false);
 
   const activeOrder = orders.find((o) => o.id === activeOId);
 
   if (scanning) return (
-    <ScanScreen actorName="Admin" onBack={() => setScanning(false)} onConfirm={(o) => { onAddOrder(o); setActiveOId(o.id); setScanning(false); }} />
+    <ScanScreen
+      actorName="Admin"
+      onBack={() => setScanning(false)}
+      onConfirm={(o) => { onAddOrder(o); setActiveOId(o.id); setScanning(false); }}
+    />
   );
 
   if (activeOrder) return (
     <OrderDetail
       order={activeOrder}
       actorName="Admin"
+      isAdmin={true}
       onBack={() => setActiveOId(null)}
       onUpdate={(sIdx, iIdx, changes) => onOrderUpdate(activeOrder.id, sIdx, iIdx, changes)}
       onBilled={() => { onOrderBilled(activeOrder.id); setActiveOId(null); }}
     />
   );
 
-  const tabs = [["users","👥 Users"],["orders","📋 Orders"],["analytics","📊 Analytics"]];
-  const tabSt = (a) => ({
+  const tabs   = [["users","👥 Users"],["orders","📋 Orders"],["analytics","📊 Analytics"]];
+  const tabSt  = (a) => ({
     flex: 1, padding: "8px 4px", borderRadius: 7, border: "none", cursor: "pointer",
     fontFamily: C.sans, fontSize: 12, fontWeight: a ? 700 : 400,
     background: a ? "#fff" : "transparent", color: a ? C.text : C.textDim,
@@ -828,7 +1157,7 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
   const today  = orders.filter((o) => o.date === TODAY);
   const older  = orders.filter((o) => o.date !== TODAY);
 
-  // analytics
+  // Analytics — derived from live order data
   const unfulfilled = [];
   orders.forEach((o) => o.sections.forEach((sec) => sec.items.forEach((item) => {
     if (item.status === "unavailable" || item.status === "partial") {
@@ -843,11 +1172,11 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
     skuMap[e.sku].totalMissed += e.reqQty - e.sentQty;
     skuMap[e.sku].occurrences.push(e);
   });
-  const skus       = Object.values(skuMap).sort((a, b) => (b.naCount + b.partialCount) - (a.naCount + a.partialCount));
-  const totalNA    = unfulfilled.filter((e) => e.type === "unavailable").length;
-  const totalPart  = unfulfilled.filter((e) => e.type === "partial").length;
-  const totalMiss  = unfulfilled.reduce((s, e) => s + e.reqQty - e.sentQty, 0);
-  const maxVol     = Math.max(...DAILY_VOLUME.map((d) => d.count));
+  const skus      = Object.values(skuMap).sort((a, b) => (b.naCount + b.partialCount) - (a.naCount + a.partialCount));
+  const totalNA   = unfulfilled.filter((e) => e.type === "unavailable").length;
+  const totalPart = unfulfilled.filter((e) => e.type === "partial").length;
+  const totalMiss = unfulfilled.reduce((s, e) => s + e.reqQty - e.sentQty, 0);
+  const maxVol    = Math.max(...DAILY_VOLUME.map((d) => d.count));
 
   return (
     <div style={{ minHeight: 620, display: "flex", flexDirection: "column", background: C.bg }}>
@@ -883,11 +1212,13 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
                 <div style={{ fontSize: 12, fontWeight: 700, color: C.amber, marginBottom: 12 }}>NEW STAFF MEMBER</div>
                 <div style={{ marginBottom: 10 }}>
                   <div style={{ fontSize: 11, color: C.textDim, marginBottom: 4, fontWeight: 600 }}>NAME</div>
-                  <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Staff name" style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${C.borderMd}`, fontSize: 14, fontFamily: C.sans, outline: "none", color: C.text, background: "#fff", boxSizing: "border-box" }} />
+                  <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Staff name"
+                    style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${C.borderMd}`, fontSize: 14, fontFamily: C.sans, outline: "none", color: C.text, background: "#fff", boxSizing: "border-box" }} />
                 </div>
                 <div style={{ marginBottom: 14 }}>
                   <div style={{ fontSize: 11, color: C.textDim, marginBottom: 4, fontWeight: 600 }}>4-DIGIT PIN</div>
-                  <input value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="e.g. 4821" maxLength={4} type="tel" style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${C.borderMd}`, fontSize: 16, fontFamily: C.mono, outline: "none", color: C.text, background: "#fff", boxSizing: "border-box", letterSpacing: 4 }} />
+                  <input value={newPin} onChange={(e) => setNewPin(e.target.value)} placeholder="e.g. 4821" maxLength={4} type="tel"
+                    style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${C.borderMd}`, fontSize: 16, fontFamily: C.mono, outline: "none", color: C.text, background: "#fff", boxSizing: "border-box", letterSpacing: 4 }} />
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <Btn onClick={() => {
@@ -911,16 +1242,16 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
                     </div>
                     <span style={{ fontFamily: C.mono, fontSize: 10, fontWeight: 600, padding: "3px 8px", borderRadius: 4, background: bg, color: c, border: `1px solid ${bd}` }}>{ac ? "ACTIVE" : "INACTIVE"}</span>
                   </div>
-                  <div style={{ display: "flex", gap: 6, paddingTop: 10, borderTop: `1px solid #F3F4F6` }}>
+                  <div style={{ display: "flex", gap: 6, paddingTop: 10, borderTop: "1px solid #F3F4F6" }}>
                     <div style={{ flex: 1, textAlign: "center" }}>
                       <div style={{ fontFamily: C.mono, fontWeight: 700, fontSize: 16, color: C.text }}>{u.itemsHandled}</div>
                       <div style={{ fontSize: 10, color: C.textDim }}>items today</div>
                     </div>
-                    <div style={{ flex: 1, textAlign: "center", borderLeft: `1px solid #F3F4F6` }}>
+                    <div style={{ flex: 1, textAlign: "center", borderLeft: "1px solid #F3F4F6" }}>
                       <div style={{ fontFamily: C.mono, fontWeight: 700, fontSize: 16, color: C.text }}>{u.ordersToday}</div>
                       <div style={{ fontSize: 10, color: C.textDim }}>orders today</div>
                     </div>
-                    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, borderLeft: `1px solid #F3F4F6`, paddingLeft: 8 }}>
+                    <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "flex-end", borderLeft: "1px solid #F3F4F6", paddingLeft: 8 }}>
                       <Btn onClick={() => onUserChange("toggle", u.id)} color={ac ? "redO" : "greenO"} sx={{ padding: "5px 10px", fontSize: 11 }}>{ac ? "Deactivate" : "Activate"}</Btn>
                     </div>
                   </div>
@@ -935,7 +1266,7 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
           <>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, flex: 1 }}>
-                {[[today.length,"Total",C.text],[today.filter((o)=>o.status==="live").length,"Live",C.amber],[today.filter((o)=>o.status==="billed").length,"Billed",C.green]].map(([v,l,c])=>(
+                {[[today.length,"Total",C.text],[today.filter(o=>o.status==="live").length,"Live",C.amber],[today.filter(o=>o.status==="billed").length,"Billed",C.green]].map(([v,l,c]) => (
                   <div key={l} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 8px", textAlign: "center" }}>
                     <div style={{ fontFamily: C.mono, fontWeight: 700, fontSize: 20, color: c }}>{v}</div>
                     <div style={{ fontSize: 10, color: C.textDim, marginTop: 1 }}>{l}</div>
@@ -944,17 +1275,28 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
               </div>
               <Btn onClick={() => setScanning(true)} color="amber" sx={{ padding: "10px 14px", fontSize: 12, flexShrink: 0, whiteSpace: "nowrap" }}>+ New</Btn>
             </div>
-            {today.length > 0 && <><GrpLabel label="Today"   color={C.amber} />{today.map((o)=><OrderCard key={o.id} order={o} onOpen={setActiveOId} isAdmin />)}</>}
-            {older.length > 0 && <><GrpLabel label="Earlier" color={C.gray}  />{older.map((o)=><OrderCard key={o.id} order={o} onOpen={setActiveOId} dim isAdmin />)}</>}
+
+            {today.length > 0 && (
+              <>
+                <GrpLabel label="Today" color={C.amber} />
+                {today.map((o) => <OrderCard key={o.id} order={o} onOpen={setActiveOId} />)}
+              </>
+            )}
+            {older.length > 0 && (
+              <>
+                <GrpLabel label="Earlier" color={C.gray} />
+                {/* FIX 2: Pass onDelete to older orders so admin can delete them */}
+                {older.map((o) => <OrderCard key={o.id} order={o} onOpen={setActiveOId} onDelete={onDeleteOrder} dim />)}
+              </>
+            )}
           </>
         )}
 
         {/* ── ANALYTICS TAB ── */}
         {tab === "analytics" && (
           <>
-            {/* Summary */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 18 }}>
-              {[[totalNA,"N/A items",C.red],[totalPart,"Partial fills",C.amber],[totalMiss,"Units missed",C.text]].map(([v,l,c])=>(
+              {[[totalNA,"N/A items",C.red],[totalPart,"Partial fills",C.amber],[totalMiss,"Units missed",C.text]].map(([v,l,c]) => (
                 <div key={l} style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 10, padding: "12px 10px", textAlign: "center" }}>
                   <div style={{ fontFamily: C.mono, fontWeight: 700, fontSize: 22, color: c }}>{v}</div>
                   <div style={{ fontSize: 10, color: C.textDim, marginTop: 2 }}>{l}</div>
@@ -962,7 +1304,6 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
               ))}
             </div>
 
-            {/* Volume chart */}
             <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: 16, marginBottom: 14 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: C.textDim, letterSpacing: "0.8px", marginBottom: 14 }}>ORDER VOLUME — LAST 7 DAYS</div>
               <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 80 }}>
@@ -979,14 +1320,13 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
               </div>
             </div>
 
-            {/* Unfulfilled SKUs */}
             <div style={{ fontSize: 11, fontWeight: 700, color: C.textDim, letterSpacing: "0.8px", marginBottom: 8 }}>UNFULFILLED ITEMS</div>
             <div style={{ fontSize: 12, color: C.textDim, marginBottom: 12 }}>Tap any SKU to see affected orders and customers.</div>
             {skus.length === 0 && <div style={{ textAlign: "center", color: C.textFaint, padding: "32px 0", fontSize: 13 }}>No unfulfilled items yet.</div>}
             {skus.map((skuData) => {
-              const isExp   = expandSku === skuData.sku;
-              const total   = skuData.naCount + skuData.partialCount;
-              const naW     = total > 0 ? Math.round((skuData.naCount / total) * 100) : 0;
+              const isExp  = expandSku === skuData.sku;
+              const total  = skuData.naCount + skuData.partialCount;
+              const naW    = total > 0 ? Math.round((skuData.naCount / total) * 100) : 0;
               return (
                 <div key={skuData.sku} style={{ background: "#fff", border: `1px solid ${isExp ? C.redBd : C.border}`, borderRadius: 12, marginBottom: 10, overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
                   <div onClick={() => setExpandSku(isExp ? null : skuData.sku)} style={{ padding: "14px 16px", cursor: "pointer" }}>
@@ -1008,9 +1348,9 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
                     </div>
                   </div>
                   {isExp && (
-                    <div style={{ borderTop: `1px solid #F3F4F6`, background: "#FAFAFA" }}>
+                    <div style={{ borderTop: "1px solid #F3F4F6", background: "#FAFAFA" }}>
                       {[...skuData.occurrences].sort((a, b) => b.date.localeCompare(a.date)).map((occ, i, arr) => (
-                        <div key={i} style={{ padding: "10px 16px", borderBottom: i < arr.length - 1 ? `1px solid #F3F4F6` : "none", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div key={i} style={{ padding: "10px 16px", borderBottom: i < arr.length - 1 ? "1px solid #F3F4F6" : "none", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                           <div>
                             <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{occ.customer}</div>
                             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 3 }}>
@@ -1043,46 +1383,92 @@ function AdminApp({ orders, users, onSignOut, onOrderUpdate, onOrderBilled, onAd
 
 // ─── ROOT APP ─────────────────────────────────────────────────
 export default function App() {
-  const [screen,  setScreen]  = useState("choose"); // choose|staff-select|staff-pin|staff-app|admin-pin|admin-app
-  const [staffId, setStaffId] = useState(null);
-  const [orders,  setOrders]  = useState(SEED_ORDERS);
-  const [users,   setUsers]   = useState(SEED_USERS);
+  const [screen,        setScreen]        = useState("choose");
+  const [staffId,       setStaffId]       = useState(null);
   const [activeOrderId, setActiveOrderId] = useState(null);
-  const [orderReturnTo, setOrderReturnTo] = useState("home");
+  const [orders,        setOrders]        = useState([]);
+  const [users,         setUsers]         = useState([]);
+  const [loading,       setLoading]       = useState(true);
+
+  // ── Firebase real-time listeners ─────────────────────────────
+  useEffect(() => {
+    const ordersRef = ref(db, "orders");
+    const unsubOrders = onValue(ordersRef, (snap) => {
+      const val = snap.val();
+      if (val) {
+        setOrders(purgeOldOrders(Object.values(val)));
+      } else {
+        SEED_ORDERS.forEach((o) => set(ref(db, `orders/${o.id}`), o));
+        setOrders(purgeOldOrders(SEED_ORDERS));
+      }
+      setLoading(false);
+    });
+
+    const usersRef = ref(db, "users");
+    const unsubUsers = onValue(usersRef, (snap) => {
+      const val = snap.val();
+      if (val) {
+        setUsers(Object.values(val));
+      } else {
+        SEED_USERS.forEach((u) => set(ref(db, `users/${u.id}`), u));
+        setUsers(SEED_USERS);
+      }
+    });
+
+    const purgeInterval = setInterval(() => {
+      setOrders((prev) => {
+        const purged = purgeOldOrders(prev);
+        prev.filter((o) => !purged.find((p) => p.id === o.id))
+            .forEach((o) => remove(ref(db, `orders/${o.id}`)));
+        return purged;
+      });
+    }, 60 * 60 * 1000);
+
+    return () => { unsubOrders(); unsubUsers(); clearInterval(purgeInterval); };
+  }, []);
 
   const staffUser   = users.find((u) => u.id === staffId);
   const actorName   = screen === "admin-app" ? "Admin" : (staffUser?.name || "Staff");
   const activeOrder = orders.find((o) => o.id === activeOrderId);
 
-  // ── Order mutations ──────────────────────────────────────────
-  // FIREBASE NOTE: Each of these should also call:
-  //   set(ref(db, `orders/${orderId}`), updatedOrder)
-
+  // ── Mutations — write to Firebase ────────────────────────────
   const updateItem = (orderId, sIdx, iIdx, changes) => {
-    setOrders((prev) => prev.map((o) => {
-      if (o.id !== orderId) return o;
-      const n = cl(o);
-      Object.assign(n.sections[sIdx].items[iIdx], changes);
-      return n;
-    }));
+    const order = orders.find((o) => o.id === orderId);
+    if (!order) return;
+    const updated = cl(order);
+    Object.assign(updated.sections[sIdx].items[iIdx], changes);
+    set(ref(db, `orders/${orderId}`), updated);
   };
 
   const billOrder = (orderId) => {
-    setOrders((prev) => prev.map((o) =>
-      o.id === orderId ? { ...o, status: "billed", billedBy: actorName, billedAt: nowTime() } : o
-    ));
+    const order = orders.find((o) => o.id === orderId);
+    if (!order) return;
+    set(ref(db, `orders/${orderId}`), { ...order, status: "billed", billedBy: actorName, billedAt: nowTime() });
   };
 
-  const addOrder = (order) => {
-    setOrders((prev) => [order, ...prev]);
-  };
+  const addOrder  = (order) => set(ref(db, `orders/${order.id}`), order);
+  const deleteOrder = (orderId) => remove(ref(db, `orders/${orderId}`));
 
   const updateUser = (action, payload) => {
-    if (action === "add") setUsers((prev) => [...prev, payload]);
-    if (action === "toggle") setUsers((prev) => prev.map((u) => u.id === payload ? { ...u, active: !u.active } : u));
+    if (action === "add") set(ref(db, `users/${payload.id}`), payload);
+    if (action === "toggle") {
+      const user = users.find((u) => u.id === payload);
+      if (user) set(ref(db, `users/${payload}`), { ...user, active: !user.active });
+    }
   };
 
-  // ── Screens ──────────────────────────────────────────────────
+  // ── Loading screen ───────────────────────────────────────────
+  if (loading) return (
+    <div style={{ minHeight: 620, background: "#fff", display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center", gap: 16 }}>
+      <div style={{ fontFamily: C.mono, fontWeight: 700, fontSize: 20, color: C.amber }}>
+        ORDER<span style={{ color: C.gray }}>FLOW</span>
+      </div>
+      <div style={{ fontSize: 13, color: C.textDim }}>Connecting to database…</div>
+    </div>
+  );
+
+  // ── Screen routing ───────────────────────────────────────────
   if (screen === "choose") return (
     <ChooseScreen onStaff={() => setScreen("staff-select")} onAdmin={() => setScreen("admin-pin")} />
   );
@@ -1090,12 +1476,18 @@ export default function App() {
   if (screen === "staff-select") {
     const active = users.filter((u) => u.active);
     return (
-      <div style={{ minHeight: 620, background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 32, position: "relative" }}>
-        <button onClick={() => setScreen("choose")} style={{ position: "absolute", top: 16, left: 16, background: "none", border: "none", color: C.textDim, cursor: "pointer", fontSize: 20, padding: 4 }}>←</button>
+      <div style={{ minHeight: 620, background: "#fff", display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center", padding: 32, position: "relative" }}>
+        <button onClick={() => setScreen("choose")} style={{ position: "absolute", top: 16, left: 16,
+          background: "none", border: "none", color: C.textDim, cursor: "pointer", fontSize: 20, padding: 4 }}>&#8592;</button>
         <div style={{ fontSize: 13, fontWeight: 600, color: C.textDim, marginBottom: 20, letterSpacing: "0.5px" }}>WHO ARE YOU?</div>
         <div style={{ width: "100%", maxWidth: 320, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           {active.map((u) => (
-            <button key={u.id} onClick={() => { setStaffId(u.id); setScreen("staff-pin"); }} style={{ padding: 14, borderRadius: 10, cursor: "pointer", background: "#fff", border: `1px solid ${C.borderMd}`, color: C.text, fontWeight: 600, fontSize: 15, fontFamily: C.sans }}>{u.name}</button>
+            <button key={u.id} onClick={() => { setStaffId(u.id); setScreen("staff-pin"); }}
+              style={{ padding: 14, borderRadius: 10, cursor: "pointer", background: "#fff",
+                border: `1px solid ${C.borderMd}`, color: C.text, fontWeight: 600, fontSize: 15, fontFamily: C.sans }}>
+              {u.name}
+            </button>
           ))}
         </div>
       </div>
@@ -1103,68 +1495,42 @@ export default function App() {
   }
 
   if (screen === "staff-pin") return (
-    <PinScreen
-      title={staffUser?.name || ""}
-      subtitle="Enter your 4-digit PIN"
-      avatar={staffUser?.name?.[0] || "?"}
-      correctPin={staffUser?.pin || ""}
-      onSuccess={() => setScreen("staff-app")}
-      onBack={() => setScreen("staff-select")}
-    />
+    <PinScreen title={staffUser?.name || ""} subtitle="Enter your 4-digit PIN"
+      avatar={staffUser?.name?.[0] || "?"} correctPin={staffUser?.pin || ""}
+      onSuccess={() => setScreen("staff-app")} onBack={() => setScreen("staff-select")} />
   );
 
   if (screen === "admin-pin") return (
-    <PinScreen
-      title="Admin Access"
-      subtitle="Enter admin PIN"
-      hint="(hint: 0000)"
-      avatar="🔐"
-      correctPin="0000"
-      onSuccess={() => setScreen("admin-app")}
-      onBack={() => setScreen("choose")}
-    />
+    <PinScreen title="Admin Access" subtitle="Enter admin PIN" hint="(hint: 0000)"
+      avatar="🔐" correctPin="0000"
+      onSuccess={() => setScreen("admin-app")} onBack={() => setScreen("choose")} />
+  );
+
+  if (screen === "staff-scan") return (
+    <ScanScreen actorName={actorName} onBack={() => setScreen("staff-app")}
+      onConfirm={(o) => { addOrder(o); setActiveOrderId(o.id); setScreen("staff-app"); }} />
   );
 
   if (screen === "staff-app") {
     if (activeOrder) return (
-      <OrderDetail
-        order={activeOrder}
-        actorName={actorName}
+      <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false}
         onBack={() => setActiveOrderId(null)}
         onUpdate={(sIdx, iIdx, changes) => updateItem(activeOrder.id, sIdx, iIdx, changes)}
-        onBilled={() => { billOrder(activeOrder.id); setActiveOrderId(null); }}
-      />
+        onBilled={() => { billOrder(activeOrder.id); setActiveOrderId(null); }} />
     );
-    if (screen === "staff-app" && orderReturnTo === "scan") return null; // handled below
     return (
-      <StaffHome
-        orders={orders}
-        staffName={actorName}
-        onSignOut={() => setScreen("choose")}
-        onNewOrder={() => setOrderReturnTo("home")}
-        onOpenOrder={(id) => setActiveOrderId(id)}
-      />
+      <StaffHome orders={orders} staffName={actorName}
+        onSignOut={() => { setStaffId(null); setScreen("choose"); }}
+        onNewOrder={() => setScreen("staff-scan")}
+        onOpenOrder={(id) => setActiveOrderId(id)} />
     );
   }
 
   if (screen === "admin-app") return (
-    <AdminApp
-      orders={orders}
-      users={users}
-      onSignOut={() => setScreen("choose")}
-      onOrderUpdate={updateItem}
-      onOrderBilled={billOrder}
-      onAddOrder={addOrder}
-      onUserChange={updateUser}
-    />
+    <AdminApp orders={orders} users={users} onSignOut={() => setScreen("choose")}
+      onOrderUpdate={updateItem} onOrderBilled={billOrder}
+      onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} />
   );
 
-  // Scan screen for staff (triggered from home)
-  return (
-    <ScanScreen
-      actorName={actorName}
-      onBack={() => setScreen("staff-app")}
-      onConfirm={(o) => { addOrder(o); setActiveOrderId(o.id); setScreen("staff-app"); }}
-    />
-  );
+  return null;
 }
