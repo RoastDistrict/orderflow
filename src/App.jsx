@@ -466,47 +466,63 @@ async function extractOrderFromImage(base64Image) {
 function parseOrderText(text) {
   const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
 
-  // SKU pattern: alphanumeric code followed by a dash and a number
-  // e.g. ASA 135-5, MBS 7407-9, HC 7813-18, SMT 88406-4
-  const skuPattern = /^([A-Z0-9][\w\s]*?[-–]\d+)\s*$/i;
-  // Qty is the number after the LAST dash
-  const extractQty = (sku) => {
-    const match = sku.match(/[-–](\d+)\s*$/);
+  // Strip leading noise characters: tick marks, slashes, dashes, bullets, checkmarks
+  const stripNoise = (line) =>
+    line.replace(/^[✓✗✘/\\\-–•*~]+\s*/, "").trim();
+
+  // A line is a SKU if it contains a dash/hyphen followed by 1-3 digits
+  // Handles: MZL 174-3, HG 7120-2, PVC 102-4, 72-F31-30, MB 7263-1
+  const isSkuLine = (line) => /[A-Z0-9][A-Z0-9\s]{1,12}[-–]\d{1,3}\s*$/i.test(line);
+
+  // Extract qty = last number after a dash
+  const extractQty = (line) => {
+    const match = line.match(/[-–](\d{1,3})\s*$/);
     return match ? parseInt(match[1]) : 1;
   };
-  const cleanSku = (raw) => raw.replace(/\s+/g, " ").trim().toUpperCase();
+
+  // Clean SKU: uppercase, collapse spaces, strip trailing/leading noise
+  const cleanSku = (raw) =>
+    raw.replace(/\s+/g, " ").trim().toUpperCase()
+       .replace(/[^A-Z0-9\s\-]/g, "").trim();
+
+  // Is this line a section header (customer name)?
+  // Section headers: contain Hindi (Devanagari), or are plain words without dashes
+  const isSectionHeader = (line) => {
+    if (line.length < 2) return false;
+    if (/^\d+$/.test(line)) return false;             // pure number
+    if (isSkuLine(line)) return false;                  // it's a SKU
+    if (/[\u0900-\u097F]/.test(line)) return true;   // contains Hindi
+    if (/^[A-Z][A-Z\s\.]{2,}$/i.test(line)) return true; // all letters = name
+    return false;
+  };
 
   const sections = [];
   let currentSection = null;
 
-  for (const line of lines) {
-    const isSkuLine = skuPattern.test(line) || /[-–]\d+\s*$/.test(line);
+  for (const rawLine of lines) {
+    const line = stripNoise(rawLine);
+    if (!line || line.length < 2) continue;
 
-    if (isSkuLine) {
-      // It's a product line
+    if (isSkuLine(line)) {
       if (!currentSection) {
         currentSection = { name: "General", items: [] };
         sections.push(currentSection);
       }
-      const sku = cleanSku(line);
-      const qty = extractQty(sku);
-      // Confidence: full marks if clearly structured, lower if it looks unusual
-      const confidence = /^[A-Z]{2,}/.test(sku) ? 88 : 60;
+      const sku  = cleanSku(line);
+      const qty  = extractQty(line);
+      // Confidence: high if starts with letters, lower if starts with number
+      const confidence = /^[A-Z]{2,}/i.test(sku) ? 85 : 65;
       currentSection.items.push({ sku, qty, confidence, skipped: false, confirmed: false });
-    } else {
-      // Likely a section header (customer name)
-      // Skip very short lines and lines that are just numbers
-      if (line.length < 2 || /^\d+$/.test(line)) continue;
-      // Start a new section
+
+    } else if (isSectionHeader(line)) {
       currentSection = { name: line, items: [] };
       sections.push(currentSection);
     }
+    // else: skip noise lines
   }
 
-  // Remove empty sections
   const filtered = sections.filter(s => s.items.length > 0);
 
-  // If nothing parsed, return empty
   if (filtered.length === 0) {
     return { sections: [{ name: "Unrecognised", items: [] }], parseError: true };
   }
