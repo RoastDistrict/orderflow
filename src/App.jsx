@@ -387,7 +387,7 @@ function parseOrderText(text,skuList){
     if(/^[A-Z][A-Z\s.]{3,}$/i.test(line))return true;
     return false;
   };
-  const sections=[];let currentSection=null;
+  const sections=[];let currentSection=null;const notesRaw=[];
   for(const rawLine of lines){
     const line=stripNoise(rawLine);
     if(!line||line.length<2)continue;
@@ -399,11 +399,15 @@ function parseOrderText(text,skuList){
       currentSection.items.push({sku:matched,qty,confidence,skipped:false,confirmed:confidence>=70});
     } else if(isSectionHeader(line)){
       currentSection={name:line,items:[]};sections.push(currentSection);
+    } else {
+      // Anything else — likely a note, phone number, instruction, date
+      // Skip very short fragments and pure numbers
+      if(line.length>4&&!/^\d{1,4}$/.test(line))notesRaw.push(line);
     }
   }
   const filtered=sections.filter(s=>s.items.length>0);
   if(filtered.length===0)return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
-  return{sections:filtered,parseError:false};
+  return{sections:filtered,notes:notesRaw.join(" · "),parseError:false};
 }
 
 // ─── REVIEW ITEM ROW ──────────────────────────────────────────
@@ -557,13 +561,16 @@ function CropScreen({imgSrc,onCrop,onRetake}){
 }
 
 // ─── SCAN SCREEN ──────────────────────────────────────────────
-function ScanScreen({actorName,onBack,onConfirm,skuList}){
-  const [stage,setStage]=useState("choose"); // choose|crop|analysing|reviewing
+function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
+  const [stage,setStage]=useState("choose"); // choose|crop|analysing|reviewing|manual
   const [rawImgSrc,setRawImgSrc]=useState(null);
   const [imgSrc,setImgSrc]=useState(null);
   const [imgB64,setImgB64]=useState(null);
   const [ext,setExt]=useState(null);
   const [error,setError]=useState(null);
+  // Manual entry state
+  const [manualLines,setManualLines]=useState([{cat:"",sku:"",qty:1}]);
+  const [manualSection,setManualSection]=useState("");
   const fileRef=useRef();
   const triggerCamera=()=>{fileRef.current.setAttribute("capture","environment");fileRef.current.click();};
   const triggerUpload=()=>{fileRef.current.removeAttribute("capture");fileRef.current.click();};
@@ -592,7 +599,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList}){
   const lowConfPending=ext?ext.sections.flatMap(s=>s.items.filter(i=>!i.skipped&&i.confidence<70&&!i.confirmed)):[];
   const canConfirm=lowConfPending.length===0;
   const confirm=()=>{
-    const order={id:genId(),date:TODAY,scannedAt:nowTime(),status:"live",sections:ext.sections.map(sec=>({name:sec.name,items:sec.items.filter(i=>!i.skipped).map(i=>({id:Date.now()+Math.random(),sku:i.sku,origQty:i.qty,qty:i.qty,status:"pending",note:"",handledBy:null,confidence:i.confidence}))})).filter(s=>s.items.length>0)};
+    const order={id:genId(),date:TODAY,scannedAt:nowTime(),status:"live",notes:ext.notes||"",sections:ext.sections.map(sec=>({name:sec.name,items:sec.items.filter(i=>!i.skipped).map(i=>({id:Date.now()+Math.random(),sku:i.sku,origQty:i.qty,qty:i.qty,status:"pending",note:"",handledBy:null,confidence:i.confidence}))})).filter(s=>s.items.length>0)};
     onConfirm(order);
   };
   const totalItems=ext?ext.sections.reduce((s,sec)=>s+sec.items.filter(i=>!i.skipped).length,0):0;
@@ -611,10 +618,70 @@ function ScanScreen({actorName,onBack,onConfirm,skuList}){
           <span style={{fontSize:30,flexShrink:0}}>📷</span>
           <div><div style={{fontWeight:700,fontSize:15,color:C.amber,marginBottom:2}}>Take a Photo</div><div style={{fontSize:12,color:C.textDim}}>Open camera to photograph order slip</div></div>
         </button>
-        <button onClick={triggerUpload} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+        <button onClick={triggerUpload} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left",boxShadow:"0 1px 3px rgba(0,0,0,0.06)",marginBottom:12}}>
           <span style={{fontSize:30,flexShrink:0}}>🖼️</span>
           <div><div style={{fontWeight:700,fontSize:15,color:C.text,marginBottom:2}}>Upload from Gallery</div><div style={{fontSize:12,color:C.textDim}}>Choose an existing photo</div></div>
         </button>
+        <button onClick={()=>{setManualLines([{cat:"",sku:"",qty:1}]);setManualSection("");setStage("manual");}} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+          <span style={{fontSize:30,flexShrink:0}}>✏️</span>
+          <div><div style={{fontWeight:700,fontSize:15,color:C.text,marginBottom:2}}>Enter Manually</div><div style={{fontSize:12,color:C.textDim}}>Type SKU codes and quantities directly</div></div>
+        </button>
+      </>}
+      {stage==="manual"&&<>
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:5}}>CUSTOMER / SECTION NAME</div>
+          <input value={manualSection} onChange={e=>setManualSection(e.target.value)} placeholder="e.g. Mahavir Traders"
+            style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+        </div>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:10}}>ITEMS</div>
+        {manualLines.map((line,idx)=>{
+          const catSkus=line.cat?skuList.filter(s=>s.cat===line.cat):[];
+          return <div key={idx} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,marginBottom:8}}>
+              {/* Category dropdown */}
+              <select value={line.cat} onChange={e=>{const n=[...manualLines];n[idx]={...n[idx],cat:e.target.value,sku:""};setManualLines(n);}}
+                style={{padding:"8px 10px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:12,fontFamily:C.sans,outline:"none",color:line.cat?C.text:C.textDim,background:"#fff"}}>
+                <option value="">Category…</option>
+                {(catList||[]).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              {/* SKU dropdown filtered by category */}
+              <select value={line.sku} onChange={e=>{const n=[...manualLines];n[idx]={...n[idx],sku:e.target.value};setManualLines(n);}}
+                disabled={!line.cat} style={{padding:"8px 10px",borderRadius:8,border:`1px solid ${line.sku?C.amberBd:C.border}`,fontSize:12,fontFamily:C.mono,outline:"none",color:line.sku?C.text:C.textDim,background:"#fff",opacity:line.cat?1:0.5}}>
+                <option value="">SKU…</option>
+                {catSkus.map(s=><option key={s.id} value={s.id}>{s.id}</option>)}
+              </select>
+              {/* Remove button */}
+              {manualLines.length>1&&<button onClick={()=>setManualLines(manualLines.filter((_,i)=>i!==idx))}
+                style={{padding:"8px 10px",borderRadius:8,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:13}}>✕</button>}
+            </div>
+            {/* Qty */}
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:12,color:C.textDim,flexShrink:0}}>Qty:</span>
+              <button onClick={()=>{const n=[...manualLines];n[idx].qty=Math.max(1,n[idx].qty-1);setManualLines(n);}} style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:16,color:C.textDim}}>−</button>
+              <input type="number" value={line.qty} min={1} onChange={e=>{const n=[...manualLines];n[idx].qty=parseInt(e.target.value)||1;setManualLines(n);}}
+                style={{width:60,padding:"4px 0",borderRadius:7,border:`1px solid ${C.amberBd}`,fontFamily:C.mono,fontWeight:700,fontSize:18,textAlign:"center",color:C.amber,background:"#fff",outline:"none"}}/>
+              <button onClick={()=>{const n=[...manualLines];n[idx].qty++;setManualLines(n);}} style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:16,color:C.textDim}}>+</button>
+            </div>
+          </div>;
+        })}
+        <Btn onClick={()=>setManualLines([...manualLines,{cat:"",sku:"",qty:1}])} color="ghost" sx={{width:"100%",padding:10,marginBottom:16}}>+ Add Another SKU</Btn>
+        {(()=>{
+          const validLines=manualLines.filter(l=>l.sku);
+          const canSubmit=validLines.length>0;
+          return <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <Btn onClick={()=>{
+              if(!canSubmit)return;
+              const order={id:genId(),date:TODAY,scannedAt:nowTime(),status:"live",notes:"",sections:[{
+                name:manualSection.trim()||"Manual Entry",
+                items:validLines.map(l=>({id:Date.now()+Math.random(),sku:l.sku,origQty:l.qty,qty:l.qty,status:"pending",note:"",handledBy:null,confidence:100}))
+              }]};
+              onConfirm(order);
+            }} color={canSubmit?"green":"ghost"} sx={{width:"100%",padding:13,fontSize:14,opacity:canSubmit?1:0.5,cursor:canSubmit?"pointer":"not-allowed"}}>
+              {canSubmit?`✓ Create Order (${validLines.length} item${validLines.length>1?"s":""})`:"Select at least one SKU"}
+            </Btn>
+            <Btn onClick={()=>setStage("choose")} color="ghost" sx={{width:"100%",padding:11}}>↩ Back</Btn>
+          </div>;
+        })()}
       </>}
       {stage==="preview"&&<>
         <img src={imgSrc} alt="slip" style={{width:"100%",borderRadius:12,border:`1px solid ${C.border}`,display:"block",marginBottom:12}}/>
@@ -649,6 +716,10 @@ function ScanScreen({actorName,onBack,onConfirm,skuList}){
           <div style={{flex:1,fontSize:13,color:C.text,fontWeight:600}}>{totalItems} item{totalItems!==1?"s":""} extracted</div>
           {lowConfPending.length>0?<span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:4,background:C.amberBg,color:C.amber,border:`1px solid ${C.amberBd}`}}>{lowConfPending.length} need review</span>:<span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:4,background:C.greenBg,color:C.green,border:`1px solid ${C.greenBd}`}}>All verified ✓</span>}
         </div>
+        {ext.notes&&<div style={{background:C.blueBg,border:`1px solid ${C.blueBd}`,borderRadius:10,padding:"10px 14px",marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.blue,letterSpacing:"0.8px",marginBottom:4}}>NOTES CAPTURED FROM SLIP</div>
+          <div style={{fontSize:12,color:C.text}}>{ext.notes}</div>
+        </div>}
         {ext.sections.map((sec,sIdx)=><div key={sIdx} style={{marginBottom:20}}>
           <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.8px",color:C.textDim,marginBottom:8,display:"flex",alignItems:"center",gap:8}}><span style={{color:C.amber}}>§</span>{sec.name.toUpperCase()}</div>
           {sec.items.map((item,iIdx)=><ReviewItemRow key={iIdx} item={item} sIdx={sIdx} iIdx={iIdx} onChange={updateItem} onSkip={()=>skipItem(sIdx,iIdx)}/>)}
@@ -664,7 +735,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList}){
 }
 
 // ─── ORDER DETAIL ─────────────────────────────────────────────
-function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,skuList,catList}){
+function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,skuList,catList}){
   const [expandedKey,setExpandedKey]=useState(null);
   const [billingOpen,setBillingOpen]=useState(false);
   const [editQty,setEditQty]=useState("");
@@ -723,6 +794,27 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,skuList,c
     </div>
 
     <div style={{flex:1,overflowY:"auto",padding:"14px 20px 100px"}}>
+      {/* Order notes callout — editable */}
+      {(()=>{
+        const [editingNotes,setEditingNotes]=React.useState(false);
+        const [notesVal,setNotesVal]=React.useState(order.notes||"");
+        const hasNotes=order.notes&&order.notes.trim();
+        if(!hasNotes&&!editingNotes)return <button onClick={()=>setEditingNotes(true)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:11,fontFamily:C.sans,marginBottom:12,padding:0}}>+ Add order notes</button>;
+        return <div style={{background:C.blueBg,border:`1px solid ${C.blueBd}`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+            <span style={{fontSize:10,fontWeight:700,color:C.blue,letterSpacing:"0.8px"}}>ORDER NOTES</span>
+            {!editingNotes&&<button onClick={()=>{setNotesVal(order.notes||"");setEditingNotes(true);}} style={{background:"none",border:"none",color:C.blue,cursor:"pointer",fontSize:11,fontFamily:C.sans}}>Edit</button>}
+          </div>
+          {editingNotes?<>
+            <textarea value={notesVal} onChange={e=>setNotesVal(e.target.value)} rows={3}
+              style={{width:"100%",padding:"8px 10px",borderRadius:7,border:`1px solid ${C.blueBd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",resize:"vertical"}}/>
+            <div style={{display:"flex",gap:8,marginTop:8}}>
+              <Btn onClick={()=>{onUpdate(-1,-1,{_notes:notesVal.trim()});setEditingNotes(false);}} color="green" sx={{flex:1,padding:8,fontSize:12}}>Save</Btn>
+              <Btn onClick={()=>setEditingNotes(false)} color="ghost" sx={{padding:"8px 12px",fontSize:12}}>Cancel</Btn>
+            </div>
+          </>:<div style={{fontSize:13,color:C.text,lineHeight:1.5}}>{order.notes}</div>}
+        </div>;
+      })()}
       {/* Pending items by section */}
       {pending.length>0&&<>
         <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:10}}>PENDING ({pending.length})</div>
@@ -842,6 +934,9 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,skuList,c
           <Btn onClick={()=>setBillingOpen(true)} color="ghost" sx={{padding:"8px 14px",fontSize:12,gap:5}}>📄 Bill anyway</Btn>
         </div>}
     </div>}
+    {isBilled&&isAdmin&&onReopen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 20px 16px",background:"#fff"}}>
+      <Btn onClick={()=>{if(window.confirm("Move this order back to Live? Billing record will be cleared."))onReopen();}} color="amberO" sx={{width:"100%",padding:11,fontSize:13,gap:6}}>↩ Reopen as Live Order</Btn>
+    </div>}
 
     {/* Billing modal with rates + Tally export */}
     {billingOpen&&<div onClick={e=>{if(e.target===e.currentTarget)setBillingOpen(false);}} style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.4)",zIndex:100,display:"flex",flexDirection:"column",justifyContent:"flex-end"}}>
@@ -894,13 +989,17 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,skuList,c
 }
 
 // ─── ADMIN APP ────────────────────────────────────────────────
-function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onAddOrder,onUserChange,onDeleteOrder,onSkuChange}){
+function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange}){
   const [tab,setTab]=useState("orders");
   const [activeOId,setActiveOId]=useState(null);
   const [expandSku,setExpandSku]=useState(null);
   const [showAdd,setShowAdd]=useState(false);
   const [newName,setNewName]=useState("");
   const [scanning,setScanning]=useState(false);
+  const [editingUser,setEditingUser]=useState(null); // user object
+  const [editUserName,setEditUserName]=useState("");
+  const [selectedOrders,setSelectedOrders]=useState(new Set());
+  const toggleOrderSelect=id=>setSelectedOrders(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
   // SKU tab state
   const [skuPage,setSkuPage]=useState("cats"); // cats | list | modal
   const [activeCat,setActiveCat]=useState(null);
@@ -916,8 +1015,8 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
 
   const activeOrder=orders.find(o=>o.id===activeOId);
 
-  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setActiveOId(o.id);setScanning(false);}} skuList={skuList}/>;
-  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} skuList={skuList} catList={catList}/>;
+  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setActiveOId(o.id);setScanning(false);}} skuList={skuList} catList={catList}/>;
+  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} skuList={skuList} catList={catList}/>;
 
   const tabs=[["orders","📋 Orders"],["users","👥 Users"],["skus","🏷 SKUs"],["analytics","📊 Analytics"]];
   const tabSt=a=>({flex:1,padding:"8px 4px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:a?700:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
@@ -962,7 +1061,32 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
           <Btn onClick={()=>setScanning(true)} color="amber" sx={{padding:"10px 14px",fontSize:12,flexShrink:0,whiteSpace:"nowrap"}}>+ New</Btn>
         </div>
         {today.length>0&&<><GrpLabel label="Today" color={C.amber}/>{today.map(o=><OrderCard key={o.id} order={o} onOpen={setActiveOId}/>)}</>}
-        {older.length>0&&<><GrpLabel label="Earlier" color={C.gray}/>{older.map(o=><OrderCard key={o.id} order={o} onOpen={setActiveOId} onDelete={onDeleteOrder} dim/>)}</>}
+        {older.length>0&&<>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,marginTop:16}}>
+            <GrpLabel label="Earlier" color={C.gray}/>
+            <div style={{display:"flex",gap:8}}>
+              {selectedOrders.size>0&&<Btn onClick={()=>{
+                if(window.confirm(`Delete ${selectedOrders.size} order${selectedOrders.size>1?"s":""}? Cannot be undone.`)){
+                  selectedOrders.forEach(id=>onDeleteOrder(id));setSelectedOrders(new Set());
+                }
+              }} color="danger" sx={{padding:"5px 10px",fontSize:11}}>🗑 Delete {selectedOrders.size}</Btn>}
+              <Btn onClick={()=>{
+                if(window.confirm(`Delete ALL ${older.length} history orders? Cannot be undone.`)){
+                  older.forEach(o=>onDeleteOrder(o.id));setSelectedOrders(new Set());
+                }
+              }} color="danger" sx={{padding:"5px 10px",fontSize:11}}>🗑 Delete All</Btn>
+            </div>
+          </div>
+          {older.map(o=>{
+            const sel=selectedOrders.has(o.id);
+            return <div key={o.id} style={{display:"flex",alignItems:"flex-start",gap:10}}>
+              <div onClick={()=>toggleOrderSelect(o.id)} style={{marginTop:14,width:20,height:20,borderRadius:4,border:`2px solid ${sel?C.red:C.border}`,background:sel?C.redBg:"#fff",cursor:"pointer",flexShrink:0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                {sel&&<span style={{fontSize:12,color:C.red,lineHeight:1}}>✓</span>}
+              </div>
+              <div style={{flex:1}}><OrderCard order={o} onOpen={setActiveOId} onDelete={onDeleteOrder} dim/></div>
+            </div>;
+          })}
+        </>}
       </>}
 
       {/* ── USERS TAB ── */}
@@ -993,12 +1117,40 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
             <div style={{display:"flex",gap:6,paddingTop:10,borderTop:"1px solid #F3F4F6"}}>
               <div style={{flex:1,textAlign:"center"}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.text}}>{u.itemsHandled}</div><div style={{fontSize:10,color:C.textDim}}>items today</div></div>
               <div style={{flex:1,textAlign:"center",borderLeft:"1px solid #F3F4F6"}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.text}}>{u.ordersToday}</div><div style={{fontSize:10,color:C.textDim}}>orders today</div></div>
-              <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"flex-end",borderLeft:"1px solid #F3F4F6",paddingLeft:8}}>
+              <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"flex-end",gap:6,borderLeft:"1px solid #F3F4F6",paddingLeft:8}}>
+                <Btn onClick={()=>{setEditingUser(u);setEditUserName(u.name);}} color="ghost" sx={{padding:"5px 10px",fontSize:11}}>Edit</Btn>
                 <Btn onClick={()=>onUserChange("toggle",u.id)} color={ac?"redO":"greenO"} sx={{padding:"5px 10px",fontSize:11}}>{ac?"Deactivate":"Activate"}</Btn>
               </div>
             </div>
           </div>;
         })}
+
+        {/* Edit user modal */}
+        {editingUser&&<div onClick={e=>{if(e.target===e.currentTarget)setEditingUser(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+              <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT STAFF</span>
+              <button onClick={()=>setEditingUser(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+            </div>
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
+              <input value={editUserName} onChange={e=>setEditUserName(e.target.value)}
+                style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={()=>{
+                if(!editUserName.trim()){alert("Name cannot be empty.");return;}
+                onUserChange("edit",{...editingUser,name:editUserName.trim()});
+                setEditingUser(null);
+              }} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save</Btn>
+              <Btn onClick={()=>{
+                if(window.confirm(`Delete ${editingUser.name}? This cannot be undone.`)){
+                  onUserChange("delete",editingUser.id);setEditingUser(null);
+                }
+              }} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
+            </div>
+          </div>
+        </div>}
       </>}
 
       {/* ── SKUS TAB ── */}
@@ -1259,15 +1411,19 @@ export default function App(){
     const order=orders.find(o=>o.id===orderId);if(!order)return;
     const updated=cl(order);
     if(changes._sectionName){updated.sections[sIdx].name=changes._sectionName;}
+    else if(changes._notes!==undefined){updated.notes=changes._notes;}
     else{Object.assign(updated.sections[sIdx].items[iIdx],changes);}
     set(ref(db,`orders/${orderId}`),updated);
   };
   const billOrder=orderId=>{const order=orders.find(o=>o.id===orderId);if(!order)return;set(ref(db,`orders/${orderId}`),{...order,status:"billed",billedBy:actorName,billedAt:nowTime()});};
+  const reopenOrder=orderId=>{const order=orders.find(o=>o.id===orderId);if(!order)return;const u={...order,status:"live"};delete u.billedBy;delete u.billedAt;set(ref(db,`orders/${orderId}`),u);};
   const addOrder=order=>set(ref(db,`orders/${order.id}`),order);
   const deleteOrder=orderId=>remove(ref(db,`orders/${orderId}`));
   const updateUser=(action,payload)=>{
     if(action==="add")set(ref(db,`users/${payload.id}`),payload);
     if(action==="toggle"){const user=users.find(u=>u.id===payload);if(user)set(ref(db,`users/${payload}`),{...user,active:!user.active});}
+    if(action==="edit")set(ref(db,`users/${payload.id}`),payload);
+    if(action==="delete")remove(ref(db,`users/${payload}`));
   };
   const onSkuChange=(action,payload)=>{
     if(action==="add"){const key=payload.id.replace(/[^a-zA-Z0-9]/g,"_");set(ref(db,`skus/${key}`),payload);}
@@ -1283,11 +1439,11 @@ export default function App(){
 
   if(screen==="choose")return <ChooseScreen onStaff={()=>setScreen("staff-select")} onAdmin={()=>setScreen("admin-app")}/>;
   if(screen==="staff-select")return <StaffSelect users={users} onSelect={id=>{setStaffId(id);setScreen("staff-app");}} onBack={()=>setScreen("choose")}/>;
-  if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setActiveOrderId(o.id);setScreen("staff-app");}} skuList={skuList}/>;
+  if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setActiveOrderId(o.id);setScreen("staff-app");}} skuList={skuList} catList={catList}/>;
   if(screen==="staff-app"){
     if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} skuList={skuList} catList={catList}/>;
     return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)}/>;
   }
-  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange}/>;
+  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange}/>;
   return null;
 }
