@@ -247,6 +247,7 @@ const C = {
   green:"#059669", greenBg:"#ECFDF5", greenBd:"#6EE7B7",
   red:"#DC2626",   redBg:"#FEF2F2",   redBd:"#FCA5A5",
   blue:"#2563EB",  blueBg:"#EFF6FF",  blueBd:"#93C5FD",
+  indigo:"#7C3AED",indigoBg:"#F5F3FF",indigoBd:"#C4B5FD",
   gray:"#6B7280",  grayBg:"#F9FAFB",
   text:"#111827",  textDim:"#6B7280", textFaint:"#D1D5DB",
   mono:"'JetBrains Mono','Fira Mono',monospace",
@@ -367,7 +368,7 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut}){
 }
 
 // ─── GOOGLE VISION ────────────────────────────────────────────
-const VISION_API_KEY="AIzaSyDzWLmWrdFDCQyEEyK85U7asCtv2nScywU";
+const VISION_API_KEY="AIzaSyA6aUicjobSRLeGkDAG_bhit-0VCSkWONE";
 async function extractOrderFromImage(base64Image,skuList){
   const res=await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requests:[{image:{content:base64Image},features:[{type:"DOCUMENT_TEXT_DETECTION",maxResults:1}]}]})});
   const data=await res.json();
@@ -418,8 +419,105 @@ function parseOrderText(text,skuList){
   return{sections:filtered,notes:notesRaw.join(" · "),parseError:false};
 }
 
+// ─── SKU TYPEAHEAD ────────────────────────────────────────────
+// Shared typeahead input used in manual entry + order SKU editing
+function SkuTypeahead({value,onChange,onSelect,onBlur,skuList,placeholder,autoFocus,style={}}){
+  const [open,setOpen]=useState(false);
+  const [query,setQuery]=useState(value||"");
+  const wrapRef=useRef();
+
+  // Sync query when value changes from outside (e.g. edit opens with existing sku)
+  useEffect(()=>{setQuery(value||"");},[value]);
+
+  const suggestions=query.trim().length>0
+    ?skuList.filter(s=>{
+        const q=query.toUpperCase();
+        return s.id.toUpperCase().includes(q)||(s.name||"").toUpperCase().includes(q);
+      }).slice(0,8)
+    :[];
+
+  const isCustom=query.trim().length>0&&suggestions.length===0;
+  const exactMatch=skuList.find(s=>s.id.toUpperCase()===query.trim().toUpperCase());
+
+  const handleChange=e=>{
+    setQuery(e.target.value);
+    onChange(e.target.value);
+    setOpen(true);
+  };
+  const handleSelect=sku=>{
+    setQuery(sku.id);
+    onSelect(sku.id,false,sku.cat);
+    setOpen(false);
+  };
+  const handleBlur=e=>{
+    // Small delay so click on suggestion registers first
+    setTimeout(()=>{
+      setOpen(false);
+      if(onBlur)onBlur(query.trim(),isCustom&&!exactMatch);
+    },150);
+  };
+  const handleKeyDown=e=>{
+    if(e.key==="Enter"){
+      e.preventDefault();
+      if(suggestions.length>0&&!exactMatch)handleSelect(suggestions[0]);
+      else{onSelect(query.trim(),isCustom&&!exactMatch,null);setOpen(false);}
+    }
+    if(e.key==="Escape")setOpen(false);
+  };
+
+  const borderColor=isCustom?C.indigo:query&&exactMatch?C.green:query?C.amber:C.border;
+
+  return <div ref={wrapRef} style={{position:"relative",flex:1,...style}}>
+    <div style={{position:"relative"}}>
+      <input
+        value={query}
+        onChange={handleChange}
+        onFocus={()=>setOpen(true)}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        autoFocus={autoFocus}
+        placeholder={placeholder||"Type SKU code…"}
+        autoCapitalize="characters"
+        autoComplete="off"
+        spellCheck={false}
+        style={{width:"100%",padding:"9px 12px",paddingRight:isCustom?88:query&&exactMatch?72:12,borderRadius:8,border:`1.5px solid ${borderColor}`,fontFamily:C.mono,fontSize:13,color:isCustom?C.indigo:C.text,fontWeight:isCustom?600:400,background:"#fff",outline:"none",boxSizing:"border-box",transition:"border-color .15s"}}
+      />
+      {isCustom&&<span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontFamily:C.mono,fontSize:9,fontWeight:700,color:C.indigo,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:4,padding:"2px 5px",whiteSpace:"nowrap",pointerEvents:"none"}}>CUSTOM</span>}
+      {!isCustom&&query&&exactMatch&&<span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontFamily:C.mono,fontSize:9,fontWeight:700,color:C.green,background:C.greenBg,border:`1px solid ${C.greenBd}`,borderRadius:4,padding:"2px 5px",pointerEvents:"none"}}>✓</span>}
+    </div>
+    {open&&suggestions.length>0&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,boxShadow:"0 4px 16px rgba(0,0,0,0.12)",zIndex:999,maxHeight:240,overflowY:"auto"}}>
+      {suggestions.map(sku=>{
+        const catObj=sku._catName;
+        return <div key={sku.id} onMouseDown={e=>{e.preventDefault();handleSelect(sku);}}
+          style={{padding:"10px 14px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}
+          onMouseEnter={e=>e.currentTarget.style.background=C.amberBg}
+          onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+          <span style={{fontFamily:C.mono,fontWeight:600,fontSize:13,color:C.text}}>{sku.id}</span>
+          {sku._catName&&<span style={{fontFamily:C.sans,fontSize:10,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",flexShrink:0}}>{sku._catName}</span>}
+        </div>;
+      })}
+      {query.trim()&&<div onMouseDown={e=>{e.preventDefault();onSelect(query.trim().toUpperCase(),true,null);setOpen(false);setQuery(query.trim().toUpperCase());}}
+        style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:8}}
+        onMouseEnter={e=>e.currentTarget.style.background=C.indigoBg}
+        onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+        <span style={{fontFamily:C.mono,fontSize:12,color:C.indigo,fontWeight:600}}>+ Use "{query.trim().toUpperCase()}" as custom SKU</span>
+        <span style={{fontFamily:C.mono,fontSize:9,color:C.indigo,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:4,padding:"2px 5px",marginLeft:"auto"}}>CUSTOM</span>
+      </div>}
+    </div>}
+    {open&&query.trim().length>0&&suggestions.length===0&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,background:"#fff",border:`1px solid ${C.indigoBd}`,borderRadius:10,boxShadow:"0 4px 16px rgba(0,0,0,0.12)",zIndex:999}}>
+      <div onMouseDown={e=>{e.preventDefault();onSelect(query.trim().toUpperCase(),true,null);setOpen(false);}}
+        style={{padding:"12px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:8}}
+        onMouseEnter={e=>e.currentTarget.style.background=C.indigoBg}
+        onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+        <span style={{fontFamily:C.mono,fontSize:12,color:C.indigo,fontWeight:600}}>+ Add "{query.trim().toUpperCase()}" as custom SKU</span>
+        <span style={{fontFamily:C.mono,fontSize:9,color:"#fff",background:C.indigo,borderRadius:4,padding:"2px 6px",marginLeft:"auto"}}>NEW</span>
+      </div>
+    </div>}
+  </div>;
+}
+
 // ─── REVIEW ITEM ROW ──────────────────────────────────────────
-function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip}){
+function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[]}){
   const [editSku,setEditSku]=useState(!item.confirmed);
   const [skuVal,setSkuVal]=useState(item.sku);
   const [editQty,setEditQty]=useState(false);
@@ -429,15 +527,23 @@ function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip}){
   const saveQty=()=>{const n=parseInt(qtyVal);if(!isNaN(n)&&n>0)onChange(sIdx,iIdx,"qty",n);setEditQty(false);};
   return <div style={{background:item.skipped?"#fff":isLow?C.amberBg:item.confirmed?C.greenBg:"#fff",border:`1px solid ${item.skipped?C.border:isLow?C.amberBd:item.confirmed?C.greenBd:C.border}`,borderRadius:10,padding:"12px 13px",marginBottom:8,opacity:item.skipped?0.4:1}}>
     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
-      {editSku&&!item.skipped?<div style={{display:"flex",gap:6,flex:1,flexWrap:"wrap"}}>
-        <input value={skuVal} onChange={e=>setSkuVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveSku()} autoFocus placeholder="e.g. HG 3615" style={{flex:1,minWidth:120,padding:"6px 10px",borderRadius:7,border:`1px solid ${C.amber}`,fontFamily:C.mono,fontSize:13,color:C.text,background:"#fff",outline:"none"}}/>
-        <button onClick={saveSku} style={{padding:"6px 10px",borderRadius:7,border:"none",background:C.green,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:13}}>✓</button>
-        <button onClick={()=>setEditSku(false)} style={{padding:"6px 10px",borderRadius:7,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:13}}>✕</button>
+      {editSku&&!item.skipped?<div style={{display:"flex",gap:6,flex:1,alignItems:"center"}}>
+        <SkuTypeahead
+          value={skuVal}
+          onChange={v=>setSkuVal(v)}
+          onSelect={(id,isCustom)=>{setSkuVal(id);onChange(sIdx,iIdx,"sku",id);onChange(sIdx,iIdx,"confirmed",true);onChange(sIdx,iIdx,"custom",isCustom);setEditSku(false);}}
+          skuList={skuList}
+          placeholder="e.g. HG 3615"
+          autoFocus
+          style={{flex:1}}
+        />
+        <button onClick={saveSku} style={{padding:"7px 10px",borderRadius:7,border:"none",background:C.green,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:13,flexShrink:0}}>✓</button>
+        <button onClick={()=>setEditSku(false)} style={{padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:13,flexShrink:0}}>✕</button>
       </div>:<>
-        <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text,textDecoration:item.skipped?"line-through":"none",flex:1}}>{item.sku}</span>
+        <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:item.custom?C.indigo:C.text,textDecoration:item.skipped?"line-through":"none",flex:1}}>{item.sku}{item.custom&&<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px",marginLeft:6,color:C.indigo}}>CUSTOM</span>}</span>
         {!item.skipped&&<>
           <span style={{fontFamily:C.mono,fontSize:10,color:item.confidence>=85?C.green:item.confidence>=70?C.textDim:C.amber}}>{item.confidence}%</span>
-          {item.confirmed&&<span style={{fontFamily:C.mono,fontSize:10,color:C.green}}>✓</span>}
+          {item.confirmed&&!item.custom&&<span style={{fontFamily:C.mono,fontSize:10,color:C.green}}>✓</span>}
           <button onClick={()=>{setSkuVal(item.sku);setEditSku(true);}} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:11}}>Edit</button>
         </>}
       </>}
@@ -643,25 +749,24 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
         </div>
         <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:10}}>ITEMS</div>
         {manualLines.map((line,idx)=>{
-          const catSkus=line.cat?skuList.filter(s=>s.cat===line.cat):[];
-          return <div key={idx} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:8,marginBottom:8}}>
-              {/* Category dropdown */}
-              <select value={line.cat} onChange={e=>{const n=[...manualLines];n[idx]={...n[idx],cat:e.target.value,sku:""};setManualLines(n);}}
-                style={{padding:"8px 10px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:12,fontFamily:C.sans,outline:"none",color:line.cat?C.text:C.textDim,background:"#fff"}}>
-                <option value="">Category…</option>
-                {(catList||[]).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-              {/* SKU dropdown filtered by category */}
-              <select value={line.sku} onChange={e=>{const n=[...manualLines];n[idx]={...n[idx],sku:e.target.value};setManualLines(n);}}
-                disabled={!line.cat} style={{padding:"8px 10px",borderRadius:8,border:`1px solid ${line.sku?C.amberBd:C.border}`,fontSize:12,fontFamily:C.mono,outline:"none",color:line.sku?C.text:C.textDim,background:"#fff",opacity:line.cat?1:0.5}}>
-                <option value="">SKU…</option>
-                {catSkus.map(s=><option key={s.id} value={s.id}>{s.id}</option>)}
-              </select>
-              {/* Remove button */}
+          const isCustomSku=line.sku&&!skuList.find(s=>s.id.toUpperCase()===line.sku.toUpperCase());
+          return <div key={idx} style={{background:"#fff",border:`1px solid ${isCustomSku?C.indigoBd:C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+            <div style={{display:"flex",gap:8,alignItems:"flex-start",marginBottom:10}}>
+              <SkuTypeahead
+                value={line.sku}
+                onChange={val=>{const n=[...manualLines];n[idx]={...n[idx],sku:val};setManualLines(n);}}
+                onSelect={(skuId,isCustom,cat)=>{const n=[...manualLines];n[idx]={...n[idx],sku:skuId,cat:cat||n[idx].cat,custom:isCustom};setManualLines(n);}}
+                skuList={skuList}
+                autoFocus={idx===manualLines.length-1&&!line.sku}
+                placeholder="Type SKU code…"
+              />
               {manualLines.length>1&&<button onClick={()=>setManualLines(manualLines.filter((_,i)=>i!==idx))}
-                style={{padding:"8px 10px",borderRadius:8,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:13}}>✕</button>}
+                style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:13,flexShrink:0}}>✕</button>}
             </div>
+            {isCustomSku&&line.sku&&<div style={{fontSize:11,color:C.indigo,marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+              <span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px"}}>CUSTOM SKU</span>
+              <span>Not in master list — will be saved as-is</span>
+            </div>}
             {/* Qty */}
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <span style={{fontSize:12,color:C.textDim,flexShrink:0}}>Qty:</span>
@@ -674,18 +779,18 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
         })}
         <Btn onClick={()=>setManualLines([...manualLines,{cat:"",sku:"",qty:1}])} color="ghost" sx={{width:"100%",padding:10,marginBottom:16}}>+ Add Another SKU</Btn>
         {(()=>{
-          const validLines=manualLines.filter(l=>l.sku);
+          const validLines=manualLines.filter(l=>l.sku&&l.sku.trim());
           const canSubmit=validLines.length>0;
           return <div style={{display:"flex",flexDirection:"column",gap:8}}>
             <Btn onClick={()=>{
               if(!canSubmit)return;
               const order={id:genId(),date:TODAY,scannedAt:nowTime(),status:"live",notes:"",sections:[{
                 name:manualSection.trim()||"Manual Entry",
-                items:validLines.map(l=>({id:Date.now()+Math.random(),sku:l.sku,origQty:l.qty,qty:l.qty,status:"pending",note:"",handledBy:null,confidence:100}))
+                items:validLines.map(l=>({id:Date.now()+Math.random(),sku:l.sku.trim().toUpperCase(),origQty:l.qty,qty:l.qty,status:"pending",note:"",handledBy:null,confidence:100,custom:l.custom||false}))
               }]};
               onConfirm(order);
             }} color={canSubmit?"green":"ghost"} sx={{width:"100%",padding:13,fontSize:14,opacity:canSubmit?1:0.5,cursor:canSubmit?"pointer":"not-allowed"}}>
-              {canSubmit?`✓ Create Order (${validLines.length} item${validLines.length>1?"s":""})`:"Select at least one SKU"}
+              {canSubmit?`✓ Create Order (${validLines.length} item${validLines.length>1?"s":""})`:"Type at least one SKU"}
             </Btn>
             <Btn onClick={()=>setStage("choose")} color="ghost" sx={{width:"100%",padding:11}}>↩ Back</Btn>
           </div>;
@@ -730,7 +835,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
         </div>}
         {ext.sections.map((sec,sIdx)=><div key={sIdx} style={{marginBottom:20}}>
           <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.8px",color:C.textDim,marginBottom:8,display:"flex",alignItems:"center",gap:8}}><span style={{color:C.amber}}>§</span>{sec.name.toUpperCase()}</div>
-          {sec.items.map((item,iIdx)=><ReviewItemRow key={iIdx} item={item} sIdx={sIdx} iIdx={iIdx} onChange={updateItem} onSkip={()=>skipItem(sIdx,iIdx)}/>)}
+          {sec.items.map((item,iIdx)=><ReviewItemRow key={iIdx} item={item} sIdx={sIdx} iIdx={iIdx} onChange={updateItem} onSkip={()=>skipItem(sIdx,iIdx)} skuList={skuList}/>)}
         </div>)}
         {!canConfirm&&<div style={{background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:10,padding:"12px 14px",marginBottom:12,fontSize:12,color:C.amber}}>⚠ Review and edit the {lowConfPending.length} uncertain item{lowConfPending.length>1?"s":""} above before confirming.</div>}
         <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>
@@ -769,6 +874,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
   const saveSectionName=sIdx=>{if(secName.trim())onUpdate(sIdx,-1,{_sectionName:secName.trim()});setEditingSec(null);};
   // Edit item SKU
   const saveItemSku=(sIdx,iIdx)=>{if(itemSkuVal.trim())onUpdate(sIdx,iIdx,{sku:itemSkuVal.trim().toUpperCase()});setEditingItemSku(null);};
+  const saveItemSkuCustom=(sIdx,iIdx,id,isCustom)=>{onUpdate(sIdx,iIdx,{sku:id.toUpperCase(),custom:isCustom||false});setEditingItemSku(null);};
 
   const byStaff={};handled.forEach(item=>{const k=item.handledBy||"Unknown";(byStaff[k]=byStaff[k]||[]).push(item);});
   const idBg=ready?C.greenBg:C.amberBg,idC=ready?C.green:C.amber,idBd=ready?C.greenBd:C.amberBd;
@@ -848,12 +954,12 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
               return <div key={item.id} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,marginBottom:8,overflow:"hidden",boxShadow:"0 1px 2px rgba(0,0,0,0.05)"}}>
                 <div style={{padding:"12px 14px"}}>
                   <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:isOpen?0:10}}>
-                    {editingThis?<div style={{display:"flex",gap:6,flex:1,marginRight:8}}>
-                      <input value={itemSkuVal} onChange={e=>setItemSkuVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveItemSku(sI,iI)} autoFocus style={{flex:1,padding:"4px 8px",borderRadius:6,border:`1px solid ${C.amber}`,fontFamily:C.mono,fontSize:13,outline:"none"}}/>
-                      <button onClick={()=>saveItemSku(sI,iI)} style={{padding:"4px 8px",borderRadius:6,border:"none",background:C.green,color:"#fff",cursor:"pointer",fontSize:12}}>✓</button>
-                      <button onClick={()=>setEditingItemSku(null)} style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:12}}>✕</button>
+                    {editingThis?<div style={{display:"flex",gap:6,flex:1,marginRight:8,alignItems:"center"}}>
+                      <SkuTypeahead value={itemSkuVal} onChange={v=>setItemSkuVal(v)} onSelect={(id,isCustom)=>saveItemSkuCustom(sI,iI,id,isCustom)} skuList={skuList} autoFocus style={{flex:1}}/>
+                      <button onClick={()=>saveItemSku(sI,iI)} style={{padding:"4px 8px",borderRadius:6,border:"none",background:C.green,color:"#fff",cursor:"pointer",fontSize:12,flexShrink:0}}>✓</button>
+                      <button onClick={()=>setEditingItemSku(null)} style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:12,flexShrink:0}}>✕</button>
                     </div>:<div style={{display:"flex",alignItems:"center",gap:8}}>
-                      <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>{item.sku}</span>
+                      <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:item.custom?C.indigo:C.text}}>{item.sku}{item.custom&&<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px",marginLeft:6,color:C.indigo}}>CUSTOM</span>}</span>
                       <button onClick={()=>{setEditingItemSku({sIdx:sI,iIdx:iI});setItemSkuVal(item.sku);}} style={{padding:"2px 7px",borderRadius:5,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:10}}>Edit SKU</button>
                     </div>}
                     <span style={{fontFamily:C.mono,fontSize:13,color:C.textDim,fontWeight:600,flexShrink:0}}>×{item.origQty}</span>
@@ -910,11 +1016,11 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
             return <div key={item.id} style={{background:statusBg,border:`1px solid ${statusBd}`,borderRadius:10,padding:"11px 14px",marginBottom:6}}>
               <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
                 <div>
-                  {editingThis?<div style={{display:"flex",gap:6,marginBottom:4}}>
-                    <input value={itemSkuVal} onChange={e=>setItemSkuVal(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveItemSku(sI,iI)} autoFocus style={{flex:1,padding:"4px 8px",borderRadius:6,border:`1px solid ${C.amber}`,fontFamily:C.mono,fontSize:13,outline:"none"}}/>
-                    <button onClick={()=>saveItemSku(sI,iI)} style={{padding:"4px 8px",borderRadius:6,border:"none",background:C.green,color:"#fff",cursor:"pointer",fontSize:12}}>✓</button>
-                    <button onClick={()=>setEditingItemSku(null)} style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:12}}>✕</button>
-                  </div>:<span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>{item.sku}</span>}
+                  {editingThis?<div style={{display:"flex",gap:6,marginBottom:4,alignItems:"center"}}>
+                    <SkuTypeahead value={itemSkuVal} onChange={v=>setItemSkuVal(v)} onSelect={(id,isCustom)=>{saveItemSkuCustom(sI,iI,id,isCustom);}} skuList={skuList} autoFocus style={{flex:1}}/>
+                    <button onClick={()=>saveItemSku(sI,iI)} style={{padding:"4px 8px",borderRadius:6,border:"none",background:C.green,color:"#fff",cursor:"pointer",fontSize:12,flexShrink:0}}>✓</button>
+                    <button onClick={()=>setEditingItemSku(null)} style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:12,flexShrink:0}}>✕</button>
+                  </div>:<span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:item.custom?C.indigo:C.text}}>{item.sku}{item.custom&&<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px",marginLeft:6,color:C.indigo}}>CUSTOM</span>}</span>}
                   <div style={{display:"flex",alignItems:"center",gap:8,marginTop:4,flexWrap:"wrap"}}>
                     <span style={{fontSize:11,color:C.textDim}}>Req <span style={{fontFamily:C.mono,fontWeight:600,color:C.text}}>×{item.origQty}</span></span>
                     {item.qty!==item.origQty&&<span style={{fontSize:11,fontWeight:700,color:C.amber,fontFamily:C.mono,background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:4,padding:"1px 6px"}}>↳ Send ×{item.qty}</span>}
@@ -1023,8 +1129,8 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
 
   const activeOrder=orders.find(o=>o.id===activeOId);
 
-  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setActiveOId(o.id);setScanning(false);}} skuList={skuList} catList={catList}/>;
-  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} skuList={skuList} catList={catList}/>;
+  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setActiveOId(o.id);setScanning(false);}} skuList={enrichedSkuList} catList={catList}/>;
+  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} skuList={enrichedSkuList} catList={catList}/>;
 
   const tabs=[["orders","📋 Orders"],["users","👥 Users"],["skus","🏷 SKUs"],["analytics","📊 Analytics"]];
   const tabSt=a=>({flex:1,padding:"8px 4px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:a?700:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
@@ -1237,7 +1343,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
               </div>
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:sku.rate!==undefined?C.amber:C.textDim}}>₹{effectiveRate?.toLocaleString("en-IN")||"—"}</span>
-                {sku.rate!==undefined&&<span style={{fontSize:9,color:C.amber,fontFamily:C.mono,background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:3,padding:"1px 4px"}}>CUSTOM</span>}
+
                 <span style={{color:C.textDim,fontSize:14}}>›</span>
               </div>
             </div>;
@@ -1413,6 +1519,8 @@ export default function App(){
   const actorName=screen==="admin-app"?"Admin":(staffUser?.name||"Staff");
   const isAdmin=screen==="admin-app";
   const activeOrder=orders.find(o=>o.id===activeOrderId);
+  // Enrich skuList with category names for typeahead display
+  const enrichedSkuList=skuList.map(s=>{const cat=catList.find(c=>c.id===s.cat);return{...s,_catName:cat?.name||""};});
 
   // Mutations
   const updateItem=(orderId,sIdx,iIdx,changes)=>{
@@ -1447,11 +1555,11 @@ export default function App(){
 
   if(screen==="choose")return <ChooseScreen onStaff={()=>setScreen("staff-select")} onAdmin={()=>setScreen("admin-app")}/>;
   if(screen==="staff-select")return <StaffSelect users={users} onSelect={id=>{setStaffId(id);setScreen("staff-app");}} onBack={()=>setScreen("choose")}/>;
-  if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setActiveOrderId(o.id);setScreen("staff-app");}} skuList={skuList} catList={catList}/>;
+  if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setActiveOrderId(o.id);setScreen("staff-app");}} skuList={enrichedSkuList} catList={catList}/>;
   if(screen==="staff-app"){
-    if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} skuList={skuList} catList={catList}/>;
+    if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} skuList={enrichedSkuList} catList={catList}/>;
     return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)}/>;
   }
-  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange}/>;
+  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList}/>;
   return null;
 }
