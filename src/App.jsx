@@ -215,28 +215,76 @@ const getRateForSku = (skuCode, skuList) => {
 };
 
 // ─── FUZZY SKU MATCHER ────────────────────────────────────────
-const normalize = (s) => s.toUpperCase().replace(/[^A-Z0-9]/g, "");
-const similarity = (a, b) => {
-  const na = normalize(a), nb = normalize(b);
-  if (na === nb) return 1;
-  if (na.includes(nb) || nb.includes(na)) return 0.85;
-  // Levenshtein distance simplified
-  let matches = 0;
-  const shorter = na.length < nb.length ? na : nb;
-  const longer  = na.length < nb.length ? nb : na;
-  for (let i = 0; i < shorter.length; i++) {
-    if (longer.includes(shorter[i])) matches++;
-  }
-  return matches / longer.length;
+// ─── SKU MATCHER ──────────────────────────────────────────────
+// Splits a SKU string into its alpha prefix and numeric body.
+// e.g. "HC 7813"  → { prefix:"HC",  num:"7813" }
+//      "FL2 1406" → { prefix:"FL2", num:"1406" }
+//      "MFF F37"  → { prefix:"MFF", num:"F37"  }
+//      "72-129"   → { prefix:"72",  num:"129"  }  (numeric prefix ok)
+const splitSku = (s) => {
+  const clean = s.toUpperCase().replace(/[^A-Z0-9]/g, " ").trim();
+  const m = clean.match(/^([A-Z0-9]{1,6})\s+(.+)$/);
+  if (m) return { prefix: m[1], num: m[2].replace(/\s+/g,"") };
+  // No space — split at first digit run
+  const m2 = clean.match(/^([A-Z]+)(\d.*)$/);
+  if (m2) return { prefix: m2[1], num: m2[2] };
+  return { prefix: clean, num: "" };
 };
+
+// Levenshtein distance (for numeric part comparison)
+const levenshtein = (a, b) => {
+  const m = a.length, n = b.length;
+  const dp = Array.from({length:m+1}, (_,i) => Array.from({length:n+1}, (_,j) => i===0?j:j===0?i:0));
+  for (let i=1;i<=m;i++) for (let j=1;j<=n;j++)
+    dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+  return dp[m][n];
+};
+
 const fuzzyMatchSku = (raw, skuList) => {
   const clean = raw.toUpperCase().trim();
+  const {prefix:rawPfx, num:rawNum} = splitSku(clean);
+
   let best = null, bestScore = 0;
+
   for (const sku of skuList) {
-    const score = similarity(clean, sku.id);
+    const {prefix:skuPfx, num:skuNum} = splitSku(sku.id);
+
+    // ── Rule 1: prefix MUST match exactly (HC≠FC, HG≠HGG allowed with penalty)
+    if (rawPfx !== skuPfx) {
+      // Allow 1-char OCR error in prefix only if lengths are equal
+      if (rawPfx.length !== skuPfx.length) continue;
+      if (levenshtein(rawPfx, skuPfx) > 1) continue;
+    }
+
+    // ── Rule 2: score numeric part similarity
+    const rawN = rawNum.replace(/[^A-Z0-9]/g,"");
+    const skuN = skuNum.replace(/[^A-Z0-9]/g,"");
+    if (!rawN || !skuN) continue;
+
+    let score = 0;
+    if (rawN === skuN) {
+      score = rawPfx===skuPfx ? 1.0 : 0.95; // exact num, exact/near prefix
+    } else if (rawN.startsWith(skuN) || skuN.startsWith(rawN)) {
+      score = 0.88;
+    } else if (rawN.includes(skuN) || skuN.includes(rawN)) {
+      score = 0.82;
+    } else {
+      // Levenshtein on numeric part — allow up to 2 char differences
+      const dist = levenshtein(rawN, skuN);
+      const maxLen = Math.max(rawN.length, skuN.length);
+      if (dist > 2) continue; // too different
+      score = (1 - dist / maxLen) * (rawPfx===skuPfx ? 0.9 : 0.8);
+    }
+
     if (score > bestScore) { bestScore = score; best = sku.id; }
   }
-  return bestScore >= 0.7 ? { matched: best, confidence: Math.round(bestScore * 100) } : { matched: raw, confidence: 45 };
+
+  // Only return a match if score is meaningful
+  if (bestScore >= 0.80) {
+    return { matched: best, confidence: Math.round(bestScore * 100) };
+  }
+  // No good match — return raw OCR text as custom SKU
+  return { matched: clean, confidence: 0 };
 };
 
 // ─── DESIGN TOKENS ────────────────────────────────────────────
@@ -376,50 +424,83 @@ async function extractOrderFromImage(base64Image,skuList){
   return parseOrderText(rawText,skuList);
 }
 function parseOrderText(text,skuList){
-  const lines=text.split("\n").map(l=>l.trim()).filter(Boolean);
-  // Strip noise from BOTH ends: ticks, crosses, checkmarks, slashes, bullets
-  // Also strip any trailing punctuation/marks that Vision adds after the number
-  const NOISE=/[✓✗✘✔☑/\\•*~↗→←↓]/g;
-  const stripNoise=line=>line.replace(NOISE,"").replace(/\s+/g," ").trim();
-  // SKU signal: after noise removal, line ends with "- N" or "- NN" or "- NNN"
-  // allowing spaces around the dash: "HC 7813-18", "HC 7813 - 18", "72 - F31 - 30"
-  const isSkuLike=line=>{
-    const l=line.trim();
-    if(l.length<4)return false;
-    // Must end with optional-space dash optional-space 1-3 digits
-    if(!/[-–]\s*\d{1,3}\s*$/.test(l))return false;
-    // Prefix (everything before the final -NNN) must not be purely numeric
-    const prefix=l.replace(/\s*[-–]\s*\d{1,3}\s*$/,"").trim();
-    // Also reject if prefix is very short or is a date-like number
-    return prefix.length>=2&&!/^\d{1,4}$/.test(prefix);
+  // ── Step 1: clean each line ──────────────────────────────────
+  // Remove tick marks, checkmarks, crosses, slashes from anywhere in line
+  // Vision often OCRs ✓ as 'y', '/', or 'J' — strip those too when adjacent to digits
+  const NOISE_CHARS=/[✓✗✘✔☑✕•~↗→←↓]/g;
+  const cleanLine=raw=>{
+    let s=raw.replace(NOISE_CHARS,"");
+    // Strip trailing alpha chars that are OCR noise after a number: "88406-4y" → "88406-4"
+    s=s.replace(/([-–]\s*\d{1,3})[a-zA-Z]+\s*$/,"$1");
+    // Strip leading slashes/backslashes
+    s=s.replace(/^[/\\]+\s*/,"");
+    return s.replace(/\s+/g," ").trim();
   };
-  const extractQty=line=>{const m=line.match(/[-–]\s*(\d{1,3})\s*$/);return m?parseInt(m[1]):1;};
-  const extractCode=line=>line.replace(/\s*[-–]\s*\d{1,3}\s*$/,"").replace(/\s+/g," ").trim().toUpperCase();
+
+  // ── Step 2: SKU detection ─────────────────────────────────────
+  // Pattern: LETTERS/NUMS followed by dash and 1-3 digit quantity
+  // e.g. "HC 7813-18", "HC 7813 - 18", "SMT 88406-4", "72-129-1"
+  const SKU_PATTERN=/([A-Z0-9][A-Z0-9\s]{1,10}?)\s*[-–]\s*(\d{1,3})(?=\s*(?:[A-Z]|$))/gi;
+
+  const extractSkusFromLine=line=>{
+    const results=[];
+    const upper=line.toUpperCase();
+    let m;
+    const re=new RegExp(SKU_PATTERN.source,"gi");
+    while((m=re.exec(upper))!==null){
+      const code=m[1].replace(/\s+/g," ").trim();
+      const qty=parseInt(m[2]);
+      // Reject: purely numeric code (dates), too short, or qty=0
+      if(/^\d+$/.test(code)||code.length<2||qty===0)continue;
+      results.push({code,qty});
+    }
+    return results;
+  };
+
   const isSectionHeader=line=>{
     if(line.length<2||/^\d+$/.test(line))return false;
-    if(isSkuLike(line))return false;
-    if(/[\u0900-\u097F]/.test(line))return true; // Hindi/Devanagari = customer name
-    if(/^[A-Z][A-Z\s.&]{3,}$/i.test(line))return true;
+    // Has SKU pattern → not a header
+    if(extractSkusFromLine(line).length>0)return false;
+    // Hindi/Devanagari = customer name
+    if(/[\u0900-\u097F]/.test(line))return true;
+    // All-caps English words (shop names like RISHTWAYS, S.GAJMER)
+    if(/^[A-Z][A-Z\s.&\/]{2,}$/i.test(line)&&!/\d/.test(line))return true;
     return false;
   };
+
+  // ── Step 3: Process lines ─────────────────────────────────────
+  const rawLines=text.split("\n").map(l=>l.trim()).filter(Boolean);
   const sections=[];let currentSection=null;const notesRaw=[];
-  for(const rawLine of lines){
-    const line=stripNoise(rawLine);
+
+  for(const rawLine of rawLines){
+    const line=cleanLine(rawLine);
     if(!line||line.length<2)continue;
-    if(isSkuLike(line)){
+
+    const skusFound=extractSkusFromLine(line);
+
+    if(skusFound.length>0){
+      // One line may contain multiple SKUs (two-column slips)
       if(!currentSection){currentSection={name:"General",items:[]};sections.push(currentSection);}
-      const rawCode=extractCode(line);
-      const qty=extractQty(line);
-      const {matched,confidence}=skuList.length>0?fuzzyMatchSku(rawCode,skuList):{matched:rawCode.toUpperCase(),confidence:70};
-      currentSection.items.push({sku:matched,qty,confidence,skipped:false,confirmed:confidence>=70});
+      for(const {code,qty} of skusFound){
+        const {matched,confidence}=skuList.length>0
+          ?fuzzyMatchSku(code,skuList)
+          :{matched:code,confidence:0};
+        // confidence=0 means no match found → raw OCR as custom
+        currentSection.items.push({
+          sku:matched,qty,confidence,
+          skipped:false,
+          confirmed:confidence>=95,
+          custom:confidence===0
+        });
+      }
     } else if(isSectionHeader(line)){
       currentSection={name:line,items:[]};sections.push(currentSection);
     } else {
-      // Anything else — likely a note, phone number, instruction, date
-      // Skip very short fragments and pure numbers
-      if(line.length>4&&!/^\d{1,4}$/.test(line))notesRaw.push(line);
+      // Notes: skip very short or pure-numeric fragments
+      if(line.length>4&&!/^[\d\s]+$/.test(line))notesRaw.push(line);
     }
   }
+
   const filtered=sections.filter(s=>s.items.length>0);
   if(filtered.length===0)return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
   return{sections:filtered,notes:notesRaw.join(" · "),parseError:false};
@@ -540,7 +621,7 @@ function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[]}){
   const [skuVal,setSkuVal]=useState(item.sku);
   const [editQty,setEditQty]=useState(false);
   const [qtyVal,setQtyVal]=useState(String(item.qty));
-  const isLow=!item.confirmed&&item.confidence<70;
+  const isLow=!item.confirmed&&!(!item.sku||!item.sku.trim()); // unconfirmed non-blank items need review
   const saveSku=()=>{onChange(sIdx,iIdx,"sku",skuVal.trim().toUpperCase());onChange(sIdx,iIdx,"confirmed",true);setEditSku(false);};
   const saveQty=()=>{const n=parseInt(qtyVal);if(!isNaN(n)&&n>0)onChange(sIdx,iIdx,"qty",n);setEditQty(false);};
   return <div style={{background:item.skipped?"#fff":isLow?C.amberBg:item.confirmed?C.greenBg:"#fff",border:`1px solid ${item.skipped?C.border:isLow?C.amberBd:item.confirmed?C.greenBd:C.border}`,borderRadius:10,padding:"12px 13px",marginBottom:8,opacity:item.skipped?0.4:1}}>
@@ -580,7 +661,7 @@ function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[]}){
       <button onClick={onSkip} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:11}}>Remove</button>
     </div>}
     {isLow&&!item.skipped&&<div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.amberBd}`}}>
-      <div style={{fontSize:11,color:C.amber,marginBottom:8}}>⚠ AI uncertain — verify SKU and qty, then tap Edit to confirm.</div>
+      <div style={{fontSize:11,color:C.amber,marginBottom:8}}>⚠ {item.confidence>0?`AI matched at ${item.confidence}% — verify and confirm.`:"No match found — please enter the correct SKU."}</div>
     </div>}
   </div>;
 }
@@ -728,10 +809,11 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
   const updateItem=(sIdx,iIdx,field,value)=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].items[iIdx][field]=value;return n;});
   if(stage==="crop"&&rawImgSrc)return <CropScreen key="crop" imgSrc={rawImgSrc} onCrop={handleCrop} onRetake={()=>{setRawImgSrc(null);setStage("choose");setError(null);}}/>;
   const skipItem=(sIdx,iIdx)=>updateItem(sIdx,iIdx,"skipped",true);
-  const lowConfPending=ext?ext.sections.flatMap(s=>s.items.filter(i=>!i.skipped&&i.confidence<70&&!i.confirmed)):[];
+  // Items needing review: unconfirmed AND have a non-empty SKU (blank new rows excluded)
+  const lowConfPending=ext?ext.sections.flatMap(s=>s.items.filter(i=>!i.skipped&&!i.confirmed&&i.sku&&i.sku.trim())):[];
   const canConfirm=lowConfPending.length===0;
   const confirm=()=>{
-    const order={id:genId(),date:TODAY,scannedAt:nowTime(),status:"live",notes:ext.notes||"",sections:ext.sections.map(sec=>({name:sec.name,items:sec.items.filter(i=>!i.skipped).map(i=>({id:Date.now()+Math.random(),sku:i.sku,origQty:i.qty,qty:i.qty,status:"pending",note:"",handledBy:null,confidence:i.confidence}))})).filter(s=>s.items.length>0)};
+    const order={id:genId(),date:TODAY,scannedAt:nowTime(),status:"live",notes:ext.notes||"",sections:ext.sections.map(sec=>({name:sec.name,items:sec.items.filter(i=>!i.skipped&&i.sku&&i.sku.trim()).map(i=>({id:Date.now()+Math.random(),sku:i.sku.trim().toUpperCase(),origQty:i.qty,qty:i.qty,status:"pending",note:"",handledBy:null,confidence:i.confidence,custom:i.custom||false}))})).filter(s=>s.items.length>0)};
     onConfirm(order);
   };
   const totalItems=ext?ext.sections.reduce((s,sec)=>s+sec.items.filter(i=>!i.skipped).length,0):0;
@@ -854,6 +936,10 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
         {ext.sections.map((sec,sIdx)=><div key={sIdx} style={{marginBottom:20}}>
           <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.8px",color:C.textDim,marginBottom:8,display:"flex",alignItems:"center",gap:8}}><span style={{color:C.amber}}>§</span>{sec.name.toUpperCase()}</div>
           {sec.items.map((item,iIdx)=><ReviewItemRow key={iIdx} item={item} sIdx={sIdx} iIdx={iIdx} onChange={updateItem} onSkip={()=>skipItem(sIdx,iIdx)} skuList={skuList}/>)}
+          <button onClick={()=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].items.push({sku:"",qty:1,confidence:0,skipped:false,confirmed:false,custom:false});return n;})}
+            style={{width:"100%",padding:"8px",borderRadius:8,border:`1px dashed ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer",fontSize:12,fontFamily:C.sans,marginTop:6}}>
+            + Add missed SKU to {sec.name}
+          </button>
         </div>)}
         {!canConfirm&&<div style={{background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:10,padding:"12px 14px",marginBottom:12,fontSize:12,color:C.amber}}>⚠ Review and edit the {lowConfPending.length} uncertain item{lowConfPending.length>1?"s":""} above before confirming.</div>}
         <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>
