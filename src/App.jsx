@@ -859,6 +859,36 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
   </div>;
 }
 
+// ─── ORDER NOTES CALLOUT ──────────────────────────────────────
+function OrderNotesCallout({notes,onSave}){
+  const [editing,setEditing]=useState(false);
+  const [val,setVal]=useState(notes||"");
+  // Sync if notes change externally
+  useState(()=>{setVal(notes||"");},[notes]);
+  const hasNotes=notes&&notes.trim();
+  if(!hasNotes&&!editing)return(
+    <button onClick={()=>setEditing(true)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:11,fontFamily:C.sans,marginBottom:12,padding:0}}>
+      + Add order notes
+    </button>
+  );
+  return(
+    <div style={{background:C.blueBg,border:`1px solid ${C.blueBd}`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+        <span style={{fontSize:10,fontWeight:700,color:C.blue,letterSpacing:"0.8px"}}>ORDER NOTES</span>
+        {!editing&&<button onClick={()=>{setVal(notes||"");setEditing(true);}} style={{background:"none",border:"none",color:C.blue,cursor:"pointer",fontSize:11,fontFamily:C.sans}}>Edit</button>}
+      </div>
+      {editing?<>
+        <textarea value={val} onChange={e=>setVal(e.target.value)} rows={3}
+          style={{width:"100%",padding:"8px 10px",borderRadius:7,border:`1px solid ${C.blueBd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",resize:"vertical"}}/>
+        <div style={{display:"flex",gap:8,marginTop:8}}>
+          <Btn onClick={()=>{onSave(val.trim());setEditing(false);}} color="green" sx={{flex:1,padding:8,fontSize:12}}>Save</Btn>
+          <Btn onClick={()=>setEditing(false)} color="ghost" sx={{padding:"8px 12px",fontSize:12}}>Cancel</Btn>
+        </div>
+      </>:<div style={{fontSize:13,color:C.text,lineHeight:1.5}}>{notes}</div>}
+    </div>
+  );
+}
+
 // ─── EDIT ORDER SCREEN ────────────────────────────────────────
 function EditOrderScreen({order,skuList,onSave,onCancel}){
   // Deep-clone order sections into local editable state
@@ -1030,26 +1060,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
 
     <div style={{flex:1,overflowY:"auto",padding:"14px 20px 100px"}}>
       {/* Order notes callout — editable */}
-      {(()=>{
-        const [editingNotes,setEditingNotes]=React.useState(false);
-        const [notesVal,setNotesVal]=React.useState(order.notes||"");
-        const hasNotes=order.notes&&order.notes.trim();
-        if(!hasNotes&&!editingNotes)return <button onClick={()=>setEditingNotes(true)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:11,fontFamily:C.sans,marginBottom:12,padding:0}}>+ Add order notes</button>;
-        return <div style={{background:C.blueBg,border:`1px solid ${C.blueBd}`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
-            <span style={{fontSize:10,fontWeight:700,color:C.blue,letterSpacing:"0.8px"}}>ORDER NOTES</span>
-            {!editingNotes&&<button onClick={()=>{setNotesVal(order.notes||"");setEditingNotes(true);}} style={{background:"none",border:"none",color:C.blue,cursor:"pointer",fontSize:11,fontFamily:C.sans}}>Edit</button>}
-          </div>
-          {editingNotes?<>
-            <textarea value={notesVal} onChange={e=>setNotesVal(e.target.value)} rows={3}
-              style={{width:"100%",padding:"8px 10px",borderRadius:7,border:`1px solid ${C.blueBd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",resize:"vertical"}}/>
-            <div style={{display:"flex",gap:8,marginTop:8}}>
-              <Btn onClick={()=>{onUpdate(-1,-1,{_notes:notesVal.trim()});setEditingNotes(false);}} color="green" sx={{flex:1,padding:8,fontSize:12}}>Save</Btn>
-              <Btn onClick={()=>setEditingNotes(false)} color="ghost" sx={{padding:"8px 12px",fontSize:12}}>Cancel</Btn>
-            </div>
-          </>:<div style={{fontSize:13,color:C.text,lineHeight:1.5}}>{order.notes}</div>}
-        </div>;
-      })()}
+      <OrderNotesCallout notes={order.notes} onSave={v=>onUpdate(-1,-1,{_notes:v})}/>
       {/* Pending items by section */}
       {pending.length>0&&<>
         <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:10}}>PENDING ({pending.length})</div>
