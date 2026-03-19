@@ -859,12 +859,113 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
   </div>;
 }
 
+// ─── EDIT ORDER SCREEN ────────────────────────────────────────
+function EditOrderScreen({order,skuList,onSave,onCancel}){
+  // Deep-clone order sections into local editable state
+  const [sections,setSections]=useState(()=>order.sections.map(sec=>({
+    name:sec.name,
+    items:sec.items.map(it=>({...it,_qtyStr:String(it.origQty)}))
+  })));
+
+  const updateSecName=(sIdx,val)=>setSections(prev=>{const n=cl(prev);n[sIdx].name=val;return n;});
+  const updateItemSku=(sIdx,iIdx,val,isCustom)=>setSections(prev=>{const n=cl(prev);n[sIdx].items[iIdx].sku=val;n[sIdx].items[iIdx].custom=isCustom||false;return n;});
+  const updateItemQty=(sIdx,iIdx,val)=>setSections(prev=>{const n=cl(prev);n[sIdx].items[iIdx]._qtyStr=val;n[sIdx].items[iIdx].origQty=parseInt(val)||1;n[sIdx].items[iIdx].qty=parseInt(val)||1;return n;});
+  const removeItem=(sIdx,iIdx)=>setSections(prev=>{const n=cl(prev);n[sIdx].items=n[sIdx].items.filter((_,i)=>i!==iIdx);return n.filter(s=>s.items.length>0);});
+  const addItem=(sIdx)=>setSections(prev=>{
+    const n=cl(prev);
+    n[sIdx].items.push({id:Date.now()+Math.random(),sku:"",origQty:1,qty:1,_qtyStr:"1",status:"pending",note:"",handledBy:null,confidence:100,custom:false});
+    return n;
+  });
+  const addSection=()=>setSections(prev=>[...prev,{name:"New Section",items:[{id:Date.now()+Math.random(),sku:"",origQty:1,qty:1,_qtyStr:"1",status:"pending",note:"",handledBy:null,confidence:100,custom:false}]}]);
+
+  const save=()=>{
+    // Filter out blank SKUs, fix qtys
+    const cleaned=sections.map(sec=>({
+      ...sec,
+      items:sec.items
+        .filter(it=>it.sku&&it.sku.trim())
+        .map(it=>({...it,sku:it.sku.trim().toUpperCase(),origQty:parseInt(it._qtyStr)||1,qty:parseInt(it._qtyStr)||1}))
+    })).filter(s=>s.items.length>0);
+    if(cleaned.length===0){alert("Order needs at least one SKU.");return;}
+    onSave(cleaned);
+  };
+
+  return <div style={{position:"fixed",inset:0,background:C.bg,zIndex:200,display:"flex",flexDirection:"column"}}>
+    {/* Header */}
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,background:"#fff",display:"flex",alignItems:"center",gap:12,flexShrink:0}}>
+      <button onClick={onCancel} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:22,lineHeight:1,padding:0}}>✕</button>
+      <div style={{flex:1}}>
+        <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>EDIT ORDER</span>
+        <span style={{fontFamily:C.mono,fontSize:12,color:C.textDim,marginLeft:8}}>{order.id}</span>
+      </div>
+      <Btn onClick={save} color="green" sx={{padding:"8px 16px",fontSize:13}}>Save</Btn>
+    </div>
+
+    <div style={{flex:1,overflowY:"auto",padding:"16px 20px 40px"}}>
+      {sections.map((sec,sIdx)=><div key={sIdx} style={{marginBottom:20}}>
+        {/* Section name */}
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+          <span style={{color:C.amber,fontSize:14,flexShrink:0}}>§</span>
+          <input
+            value={sec.name}
+            onChange={e=>updateSecName(sIdx,e.target.value)}
+            style={{flex:1,padding:"7px 10px",borderRadius:8,border:`1px solid ${C.amberBd}`,fontFamily:C.sans,fontSize:13,fontWeight:600,color:C.text,background:"#fff",outline:"none"}}
+          />
+        </div>
+
+        {/* Items */}
+        {sec.items.map((item,iIdx)=>{
+          const isCustom=item.custom||(!skuList.find(s=>s.id.toUpperCase()===(item.sku||"").toUpperCase())&&item.sku);
+          return <div key={item.id||iIdx} style={{background:isCustom?C.indigoBg:"#fff",border:`1px solid ${isCustom?C.indigoBd:C.border}`,borderRadius:10,padding:"11px 14px",marginBottom:8}}>
+            <div style={{display:"flex",gap:8,alignItems:"flex-start",marginBottom:8}}>
+              <SkuTypeahead
+                value={item.sku}
+                onChange={val=>updateItemSku(sIdx,iIdx,val,false)}
+                onSelect={(id,isC)=>updateItemSku(sIdx,iIdx,id,isC)}
+                skuList={skuList}
+                placeholder="SKU code…"
+                style={{flex:1}}
+              />
+              <button onClick={()=>removeItem(sIdx,iIdx)}
+                style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:13,flexShrink:0}}>✕</button>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:12,color:C.textDim,flexShrink:0}}>Qty:</span>
+              <button onClick={()=>updateItemQty(sIdx,iIdx,String(Math.max(1,(parseInt(item._qtyStr)||1)-1)))}
+                style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:16,color:C.textDim}}>−</button>
+              <input type="number" value={item._qtyStr} min={1}
+                onChange={e=>updateItemQty(sIdx,iIdx,e.target.value)}
+                style={{width:60,padding:"4px 0",borderRadius:7,border:`1px solid ${C.amberBd}`,fontFamily:C.mono,fontWeight:700,fontSize:18,textAlign:"center",color:C.amber,background:"#fff",outline:"none"}}/>
+              <button onClick={()=>updateItemQty(sIdx,iIdx,String((parseInt(item._qtyStr)||1)+1))}
+                style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:16,color:C.textDim}}>+</button>
+              {item.status!=="pending"&&<span style={{fontFamily:C.mono,fontSize:10,color:C.textDim,marginLeft:4}}>({item.status})</span>}
+            </div>
+          </div>;
+        })}
+
+        {/* Add SKU to this section */}
+        <button onClick={()=>addItem(sIdx)}
+          style={{width:"100%",padding:"9px",borderRadius:8,border:`1px dashed ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer",fontSize:12,fontFamily:C.sans}}>
+          + Add SKU to {sec.name}
+        </button>
+      </div>)}
+
+      {/* Add new section */}
+      <button onClick={addSection}
+        style={{width:"100%",padding:12,borderRadius:10,border:`1px dashed ${C.amberBd}`,background:C.amberBg,color:C.amber,cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:C.sans,marginTop:8}}>
+        + Add New Section / Customer
+      </button>
+    </div>
+  </div>;
+}
+
 // ─── ORDER DETAIL ─────────────────────────────────────────────
 function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,skuList,catList}){
   const [expandedKey,setExpandedKey]=useState(null);
   const [billingOpen,setBillingOpen]=useState(false);
   const [editQty,setEditQty]=useState("");
   const [editNote,setEditNote]=useState("");
+  const [editMode,setEditMode]=useState(false);
   // Edit mode for order metadata
   const [editingSec,setEditingSec]=useState(null); // sIdx
   const [secName,setSecName]=useState("");
@@ -904,6 +1005,13 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
     const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`order_${order.id}_tally.csv`;a.click();URL.revokeObjectURL(url);
   };
 
+  if(editMode)return <EditOrderScreen
+    order={order}
+    skuList={skuList}
+    onCancel={()=>setEditMode(false)}
+    onSave={sections=>{onUpdate(-1,-1,{_fullReplace:sections});setEditMode(false);}}
+  />;
+
   return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg,position:"relative"}}>
     <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,background:"#fff"}}>
       <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
@@ -913,6 +1021,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
           <div style={{fontSize:13,fontWeight:600,color:C.text}}>{order.sections.map(s=>s.name).join(" · ")}</div>
           <div style={{fontSize:11,color:C.textDim}}>{order.scannedAt}{isBilled&&<span style={{color:C.blue,marginLeft:6}}>· Billed</span>}</div>
         </div>
+        {!isBilled&&<button onClick={()=>setEditMode(true)} style={{background:C.grayBg,border:`1px solid ${C.borderMd}`,borderRadius:7,padding:"5px 10px",cursor:"pointer",color:C.textDim,fontSize:11,fontFamily:C.sans,fontWeight:600,flexShrink:0}}>✏️ Edit Order</button>}
         {isAdmin&&<span style={{fontFamily:C.mono,fontSize:10,fontWeight:700,background:C.amberBg,color:C.amber,border:`1px solid ${C.amberBd}`,borderRadius:4,padding:"2px 6px"}}>ADMIN</span>}
       </div>
       <PBar pct={pct} ready={ready}/>
@@ -1541,6 +1650,10 @@ export default function App(){
     const updated=cl(order);
     if(changes._sectionName){updated.sections[sIdx].name=changes._sectionName;}
     else if(changes._notes!==undefined){updated.notes=changes._notes;}
+    else if(changes._fullReplace){
+      // Replace entire sections array (used by Edit Order mode)
+      updated.sections=changes._fullReplace;
+    }
     else{Object.assign(updated.sections[sIdx].items[iIdx],changes);}
     set(ref(db,`orders/${orderId}`),updated);
   };
