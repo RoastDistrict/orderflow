@@ -367,7 +367,7 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut}){
 }
 
 // ─── GOOGLE VISION ────────────────────────────────────────────
-const VISION_API_KEY="AIzaSyA6aUicjobSRLeGkDAG_bhit-0VCSkWONE";
+const VISION_API_KEY="AIzaSyDzWLmWrdFDCQyEEyK85U7asCtv2nScywU";
 async function extractOrderFromImage(base64Image,skuList){
   const res=await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requests:[{image:{content:base64Image},features:[{type:"DOCUMENT_TEXT_DETECTION",maxResults:1}]}]})});
   const data=await res.json();
