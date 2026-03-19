@@ -368,7 +368,7 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut}){
 }
 
 // ─── GOOGLE VISION ────────────────────────────────────────────
-const VISION_API_KEY="AIzaSyA6aUicjobSRLeGkDAG_bhit-0VCSkWONE";
+const VISION_API_KEY="AIzaSyDzWLmWrdFDCQyEEyK85U7asCtv2nScywU";
 async function extractOrderFromImage(base64Image,skuList){
   const res=await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requests:[{image:{content:base64Image},features:[{type:"DOCUMENT_TEXT_DETECTION",maxResults:1}]}]})});
   const data=await res.json();
@@ -429,15 +429,27 @@ function SkuTypeahead({value,onChange,onSelect,onBlur,skuList,placeholder,autoFo
   // Sync query when value changes from outside (e.g. edit opens with existing sku)
   useEffect(()=>{setQuery(value||"");},[value]);
 
+  // Normalize: strip all spaces for loose matching (SAP8113 matches SAP 8113)
+  const normQ=query.replace(/\s+/g,"").toUpperCase();
   const suggestions=query.trim().length>0
     ?skuList.filter(s=>{
-        const q=query.toUpperCase();
-        return s.id.toUpperCase().includes(q)||(s.name||"").toUpperCase().includes(q);
+        const qRaw=query.toUpperCase();
+        const idUp=s.id.toUpperCase();
+        const idNorm=idUp.replace(/\s+/g,"");
+        const nameUp=(s.name||"").toUpperCase();
+        return idUp.includes(qRaw)||idNorm.includes(normQ)||nameUp.includes(qRaw)||(s._catName||"").toUpperCase().includes(qRaw);
+      }).sort((a,b)=>{
+        // Exact match or starts-with first
+        const aN=a.id.replace(/\s+/g,"").toUpperCase();
+        const bN=b.id.replace(/\s+/g,"").toUpperCase();
+        const aStarts=aN.startsWith(normQ)?0:1;
+        const bStarts=bN.startsWith(normQ)?0:1;
+        return aStarts-bStarts;
       }).slice(0,8)
     :[];
 
-  const isCustom=query.trim().length>0&&suggestions.length===0;
-  const exactMatch=skuList.find(s=>s.id.toUpperCase()===query.trim().toUpperCase());
+  const isCustom=query.trim().length>0&&!skuList.find(s=>s.id.replace(/\s+/g,"").toUpperCase()===normQ||s.id.toUpperCase()===query.trim().toUpperCase());
+  const exactMatch=skuList.find(s=>s.id.replace(/\s+/g,"").toUpperCase()===normQ||s.id.toUpperCase()===query.trim().toUpperCase());
 
   const handleChange=e=>{
     setQuery(e.target.value);
@@ -750,7 +762,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
         <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:10}}>ITEMS</div>
         {manualLines.map((line,idx)=>{
           const isCustomSku=line.sku&&!skuList.find(s=>s.id.toUpperCase()===line.sku.toUpperCase());
-          return <div key={idx} style={{background:"#fff",border:`1px solid ${isCustomSku?C.indigoBd:C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+          return <div key={idx} style={{background:isCustomSku?C.indigoBg:"#fff",border:`1px solid ${isCustomSku?C.indigoBd:C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
             <div style={{display:"flex",gap:8,alignItems:"flex-start",marginBottom:10}}>
               <SkuTypeahead
                 value={line.sku}
@@ -1048,7 +1060,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
           <Btn onClick={()=>setBillingOpen(true)} color="ghost" sx={{padding:"8px 14px",fontSize:12,gap:5}}>📄 Bill anyway</Btn>
         </div>}
     </div>}
-    {isBilled&&isAdmin&&onReopen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 20px 16px",background:"#fff"}}>
+    {isBilled&&onReopen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 20px 16px",background:"#fff"}}>
       <Btn onClick={()=>{if(window.confirm("Move this order back to Live? Billing record will be cleared."))onReopen();}} color="amberO" sx={{width:"100%",padding:11,fontSize:13,gap:6}}>↩ Reopen as Live Order</Btn>
     </div>}
 
@@ -1103,7 +1115,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
 }
 
 // ─── ADMIN APP ────────────────────────────────────────────────
-function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange}){
+function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched}){
   const [tab,setTab]=useState("orders");
   const [activeOId,setActiveOId]=useState(null);
   const [expandSku,setExpandSku]=useState(null);
@@ -1129,8 +1141,9 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
 
   const activeOrder=orders.find(o=>o.id===activeOId);
 
-  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setActiveOId(o.id);setScanning(false);}} skuList={enrichedSkuList} catList={catList}/>;
-  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} skuList={enrichedSkuList} catList={catList}/>;
+  const eSkus=skuListEnriched||skuList;
+  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setActiveOId(o.id);setScanning(false);}} skuList={eSkus} catList={catList}/>;
+  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} skuList={eSkus} catList={catList}/>;
 
   const tabs=[["orders","📋 Orders"],["users","👥 Users"],["skus","🏷 SKUs"],["analytics","📊 Analytics"]];
   const tabSt=a=>({flex:1,padding:"8px 4px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:a?700:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
@@ -1557,7 +1570,7 @@ export default function App(){
   if(screen==="staff-select")return <StaffSelect users={users} onSelect={id=>{setStaffId(id);setScreen("staff-app");}} onBack={()=>setScreen("choose")}/>;
   if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setActiveOrderId(o.id);setScreen("staff-app");}} skuList={enrichedSkuList} catList={catList}/>;
   if(screen==="staff-app"){
-    if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} skuList={enrichedSkuList} catList={catList}/>;
+    if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} onReopen={()=>reopenOrder(activeOrder.id)} skuList={enrichedSkuList} catList={catList}/>;
     return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)}/>;
   }
   if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList}/>;
