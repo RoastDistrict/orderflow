@@ -208,14 +208,10 @@ const progData = (o) => {
 };
 
 // Look up rate for a SKU code from skus list
-const getRateForSku = (skuCode, skuList, catList) => {
+const getRateForSku = (skuCode, skuList) => {
   const found = skuList.find((s) => s.id.toUpperCase() === skuCode.toUpperCase());
-  if (!found) return null;
-  // Check if SKU has its own rate override
-  if (found.rate !== undefined) return found.rate;
-  // Fall back to category rate
-  const cat = catList.find((c) => c.id === found.cat);
-  return cat ? cat.rate : null;
+  if (!found) return found?.rate ?? 1;
+  return found.rate ?? 1;
 };
 
 // ─── FUZZY SKU MATCHER ────────────────────────────────────────
@@ -333,8 +329,8 @@ function StaffSelect({users,onSelect,onBack}){
 // ─── STAFF HOME ───────────────────────────────────────────────
 function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut}){
   const [tab,setTab]=useState("live");
-  const live=orders.filter(o=>o.status==="live"&&o.date===TODAY);
-  const hist=orders.filter(o=>o.status==="billed"||o.date!==TODAY);
+  const live=orders.filter(o=>o.status==="live");
+  const hist=orders.filter(o=>o.status==="billed");
   const inProg=live.filter(o=>!isReady(o)),ready=live.filter(o=>isReady(o));
   const grouped=hist.reduce((acc,o)=>{(acc[o.date]=acc[o.date]||[]).push(o);return acc;},{});
   const dates=Object.keys(grouped).sort((a,b)=>b.localeCompare(a));
@@ -582,12 +578,16 @@ function ScanScreen({actorName,onBack,onConfirm,skuList}){
     setStage("analysing");setError(null);
     try{
       const result=await extractOrderFromImage(b64,skuList);
-      if(result.parseError||result.sections.every(s=>s.items.length===0)){setError("Couldn't extract SKUs. Try cropping more tightly around the slip.");setStage("crop");return;}
+      if(result.parseError||result.sections.every(s=>s.items.length===0)){
+        setError("Couldn't extract SKUs. Adjust the crop more tightly and try again.");
+        setStage("analyseError"); // Don't go back to crop — preserve the crop state
+        return;
+      }
       setExt(result);setStage("reviewing");
-    }catch(err){setError("Failed to read image. Check connection.");setStage("crop");}
+    }catch(err){setError("Failed to read image. Check connection.");setStage("analyseError");}
   };
   const updateItem=(sIdx,iIdx,field,value)=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].items[iIdx][field]=value;return n;});
-  if(stage==="crop"&&rawImgSrc)return <CropScreen imgSrc={rawImgSrc} onCrop={handleCrop} onRetake={()=>{setRawImgSrc(null);setStage("choose");setError(null);}}/>;
+  if(stage==="crop"&&rawImgSrc)return <CropScreen key="crop" imgSrc={rawImgSrc} onCrop={handleCrop} onRetake={()=>{setRawImgSrc(null);setStage("choose");setError(null);}}/>;
   const skipItem=(sIdx,iIdx)=>updateItem(sIdx,iIdx,"skipped",true);
   const lowConfPending=ext?ext.sections.flatMap(s=>s.items.filter(i=>!i.skipped&&i.confidence<70&&!i.confirmed)):[];
   const canConfirm=lowConfPending.length===0;
@@ -630,6 +630,17 @@ function ScanScreen({actorName,onBack,onConfirm,skuList}){
           <div style={{fontSize:22,marginBottom:8}}>🔍</div>
           <div style={{fontWeight:700,color:C.amber,fontSize:14,marginBottom:4}}>Reading handwriting…</div>
           <div style={{fontSize:12,color:C.textDim}}>Google Vision is extracting text</div>
+        </div>
+      </>}
+      {stage==="analyseError"&&<>
+        {imgSrc&&<img src={imgSrc} alt="slip" style={{width:"100%",borderRadius:12,border:`1px solid ${C.border}`,display:"block",marginBottom:12}}/>}
+        <div style={{background:C.redBg,border:`1px solid ${C.redBd}`,borderRadius:10,padding:"14px 16px",marginBottom:16}}>
+          <div style={{fontWeight:700,color:C.red,fontSize:13,marginBottom:4}}>⚠ Extraction failed</div>
+          <div style={{fontSize:12,color:C.red,opacity:0.85}}>{error}</div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <Btn onClick={()=>{setStage("crop");setError(null);}} color="amber" sx={{width:"100%",padding:12,fontSize:14}}>✂ Adjust Crop & Retry</Btn>
+          <Btn onClick={()=>{setRawImgSrc(null);setImgSrc(null);setImgB64(null);setError(null);setStage("choose");}} color="ghost" sx={{width:"100%",padding:11}}>↩ Retake Photo</Btn>
         </div>
       </>}
       {stage==="reviewing"&&ext&&<>
@@ -848,7 +859,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,skuList,c
         {(() => {
           let grandTotal=0;
           const rows=handled.filter(i=>i.status!=="unavailable").map(item=>{
-            const rate=getRateForSku(item.sku,skuList,catList)||0;
+            const rate=getRateForSku(item.sku,skuList)||0;
             const amt=rate*item.qty;grandTotal+=amt;
             return <React.Fragment key={item.id}>
               <div style={{fontFamily:C.mono,fontSize:12,color:C.text,padding:"7px 0",borderBottom:`1px solid ${C.border}`}}>{item.sku}{item.qty!==item.origQty&&<span style={{fontSize:10,color:C.textDim}}> (req ×{item.origQty})</span>}</div>
@@ -1034,9 +1045,8 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
                 onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
                 onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
                 <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:4,lineHeight:1.3}}>{cat.name}</div>
-                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginTop:8}}>
+                <div style={{display:"flex",alignItems:"center",marginTop:8}}>
                   <span style={{fontFamily:C.mono,fontSize:11,color:C.textDim}}>{count} SKUs</span>
-                  <span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:C.amber}}>₹{(cat.defaultRate||cat.rate||0).toLocaleString("en-IN")}</span>
                 </div>
               </div>;
             })}
@@ -1049,14 +1059,14 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
             <button onClick={()=>{setSkuPage("cats");setSkuSearch("");}} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:0,lineHeight:1}}>←</button>
             <div style={{flex:1}}>
               <div style={{fontWeight:700,fontSize:15,color:C.text}}>{activeCat.name}</div>
-              <div style={{fontSize:11,color:C.textDim}}>Default rate: <span style={{fontFamily:C.mono,color:C.amber,fontWeight:700}}>₹{(activeCat.defaultRate||activeCat.rate||0).toLocaleString("en-IN")}</span></div>
+              <div style={{fontSize:11,color:C.textDim}}>{skuList.filter(s=>s.cat===activeCat.id).length} SKUs</div>
             </div>
-            <Btn onClick={()=>onSkuChange("setCatRate",{catId:activeCat.id,rate:parseInt(prompt(`New default rate for ${activeCat.name}:`)||activeCat.defaultRate||activeCat.rate)})} color="amberO" sx={{padding:"6px 10px",fontSize:11}}>Edit Rate</Btn>
+            <span style={{fontFamily:C.mono,fontSize:11,color:C.textDim}}>{skuList.filter(s=>s.cat===activeCat.id).length} SKUs</span>
           </div>
           <input value={skuSearch} onChange={e=>setSkuSearch(e.target.value)} placeholder={`Search in ${activeCat.name}…`} style={{width:"100%",padding:"10px 14px",borderRadius:10,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}/>
           <div style={{fontSize:11,color:C.textDim,marginBottom:10}}>{filteredSkus.length} SKUs</div>
           {filteredSkus.slice(0,150).map(sku=>{
-            const effectiveRate=sku.rate!==undefined?sku.rate:(activeCat.defaultRate||activeCat.rate);
+            const effectiveRate=sku.rate!==undefined?sku.rate:1;
             return <div key={sku.id} onClick={()=>{setActiveSku(sku);setEditSkuId(sku.id);setEditSkuRate(String(sku.rate!==undefined?sku.rate:""));setEditSkuCat(sku.cat);}}
               style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 14px",marginBottom:6,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
               onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
@@ -1093,7 +1103,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
             <div style={{marginBottom:12}}>
               <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>RATE (₹ per sheet)</div>
               <input type="number" value={editSkuRate} onChange={e=>setEditSkuRate(e.target.value)}
-                placeholder={`Category default: ₹${(catList.find(c=>c.id===editSkuCat)?.defaultRate||catList.find(c=>c.id===editSkuCat)?.rate||0).toLocaleString("en-IN")}`}
+                placeholder="Enter rate (₹)"
                 style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
               {editSkuRate&&<div style={{fontSize:11,color:C.amber,marginTop:4}}>Custom rate: ₹{parseInt(editSkuRate).toLocaleString("en-IN")} · overrides category default</div>}
               {!editSkuRate&&<div style={{fontSize:11,color:C.textDim,marginTop:4}}>Leave blank to use category default rate</div>}
