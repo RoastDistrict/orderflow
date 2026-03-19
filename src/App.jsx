@@ -376,15 +376,24 @@ async function extractOrderFromImage(base64Image,skuList){
 }
 function parseOrderText(text,skuList){
   const lines=text.split("\n").map(l=>l.trim()).filter(Boolean);
-  const stripNoise=line=>line.replace(/^[✓✗✘/\\-–•*~]+\s*/,"").trim();
-  const isSkuLike=line=>/[A-Z0-9][A-Z0-9\s]{0,12}[-–]\d{1,3}\s*$/i.test(line);
-  const extractQty=line=>{const m=line.match(/[-–](\d{1,3})\s*$/);return m?parseInt(m[1]):1;};
-  const extractCode=line=>line.replace(/[-–]\d{1,3}\s*$/,"").trim().toUpperCase();
+  const stripNoise=line=>line.replace(/^[✓✗✘/\\•*~]+\s*/,"").trim();
+  // SKU pattern: 1-5 letters, optional space, digits, optional space, dash, optional space, 1-3 digit qty
+  // Handles: "HG 7120-2", "HG 7120 - 2", "MZL 717-2", "ZSM 7508-04", ".72-F31-30" style too
+  const isSkuLike=line=>{
+    const l=line.trim();
+    // Standard: LETTERS[space]NUMBERS[space-space]QTY
+    if(/^[A-Z]{1,6}[\s\d]*\d\s*[-–]\s*\d{1,3}\s*$/i.test(l))return true;
+    // Dot-prefix liner style: .72-F31-30
+    if(/^\.\d{2}\s*[-–]\s*[A-Z0-9]{2,8}\s*[-–]\s*\d{1,3}\s*$/i.test(l))return true;
+    return false;
+  };
+  const extractQty=line=>{const m=line.match(/[-–]\s*(\d{1,3})\s*$/);return m?parseInt(m[1]):1;};
+  const extractCode=line=>line.replace(/\s*[-–]\s*\d{1,3}\s*$/,"").trim().toUpperCase();
   const isSectionHeader=line=>{
     if(line.length<2||/^\d+$/.test(line))return false;
     if(isSkuLike(line))return false;
-    if(/[\u0900-\u097F]/.test(line))return true;
-    if(/^[A-Z][A-Z\s.]{3,}$/i.test(line))return true;
+    if(/[\u0900-\u097F]/.test(line))return true; // Hindi/Devanagari = customer name
+    if(/^[A-Z][A-Z\s.&]{3,}$/i.test(line))return true;
     return false;
   };
   const sections=[];let currentSection=null;const notesRaw=[];
