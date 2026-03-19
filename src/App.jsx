@@ -377,18 +377,24 @@ async function extractOrderFromImage(base64Image,skuList){
 }
 function parseOrderText(text,skuList){
   const lines=text.split("\n").map(l=>l.trim()).filter(Boolean);
-  const stripNoise=line=>line.replace(/^[✓✗✘/\\•*~]+\s*/,"").trim();
-  // SKU signal: line ends with "- N" (1-3 digits after a dash).
-  // Prefix must have ≥2 chars and not be purely numeric (avoids matching dates).
+  // Strip noise from BOTH ends: ticks, crosses, checkmarks, slashes, bullets
+  // Also strip any trailing punctuation/marks that Vision adds after the number
+  const NOISE=/[✓✗✘✔☑/\\•*~↗→←↓]/g;
+  const stripNoise=line=>line.replace(NOISE,"").replace(/\s+/g," ").trim();
+  // SKU signal: after noise removal, line ends with "- N" or "- NN" or "- NNN"
+  // allowing spaces around the dash: "HC 7813-18", "HC 7813 - 18", "72 - F31 - 30"
   const isSkuLike=line=>{
     const l=line.trim();
     if(l.length<4)return false;
+    // Must end with optional-space dash optional-space 1-3 digits
     if(!/[-–]\s*\d{1,3}\s*$/.test(l))return false;
+    // Prefix (everything before the final -NNN) must not be purely numeric
     const prefix=l.replace(/\s*[-–]\s*\d{1,3}\s*$/,"").trim();
-    return prefix.length>=2&&!/^\d+$/.test(prefix);
+    // Also reject if prefix is very short or is a date-like number
+    return prefix.length>=2&&!/^\d{1,4}$/.test(prefix);
   };
   const extractQty=line=>{const m=line.match(/[-–]\s*(\d{1,3})\s*$/);return m?parseInt(m[1]):1;};
-  const extractCode=line=>line.replace(/\s*[-–]\s*\d{1,3}\s*$/,"").trim().toUpperCase();
+  const extractCode=line=>line.replace(/\s*[-–]\s*\d{1,3}\s*$/,"").replace(/\s+/g," ").trim().toUpperCase();
   const isSectionHeader=line=>{
     if(line.length<2||/^\d+$/.test(line))return false;
     if(isSkuLike(line))return false;
