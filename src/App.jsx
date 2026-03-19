@@ -377,15 +377,14 @@ async function extractOrderFromImage(base64Image,skuList){
 function parseOrderText(text,skuList){
   const lines=text.split("\n").map(l=>l.trim()).filter(Boolean);
   const stripNoise=line=>line.replace(/^[✓✗✘/\\•*~]+\s*/,"").trim();
-  // SKU pattern: 1-5 letters, optional space, digits, optional space, dash, optional space, 1-3 digit qty
-  // Handles: "HG 7120-2", "HG 7120 - 2", "MZL 717-2", "ZSM 7508-04", ".72-F31-30" style too
+  // SKU signal: line ends with "- N" (1-3 digits after a dash).
+  // Prefix must have ≥2 chars and not be purely numeric (avoids matching dates).
   const isSkuLike=line=>{
     const l=line.trim();
-    // Standard: LETTERS[space]NUMBERS[space-space]QTY
-    if(/^[A-Z]{1,6}[\s\d]*\d\s*[-–]\s*\d{1,3}\s*$/i.test(l))return true;
-    // Dot-prefix liner style: .72-F31-30
-    if(/^\.\d{2}\s*[-–]\s*[A-Z0-9]{2,8}\s*[-–]\s*\d{1,3}\s*$/i.test(l))return true;
-    return false;
+    if(l.length<4)return false;
+    if(!/[-–]\s*\d{1,3}\s*$/.test(l))return false;
+    const prefix=l.replace(/\s*[-–]\s*\d{1,3}\s*$/,"").trim();
+    return prefix.length>=2&&!/^\d+$/.test(prefix);
   };
   const extractQty=line=>{const m=line.match(/[-–]\s*(\d{1,3})\s*$/);return m?parseInt(m[1]):1;};
   const extractCode=line=>line.replace(/\s*[-–]\s*\d{1,3}\s*$/,"").trim().toUpperCase();
