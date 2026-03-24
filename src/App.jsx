@@ -3,6 +3,7 @@ import { initializeApp } from "firebase/app";
 import { getDatabase, ref, set, onValue, remove, update } from "firebase/database";
 import skuData from "./skus.json";
 import buyerData from "./buyers.json";
+import buyerGroupData from "./buyerGroups.json";
 
 // ─── FIREBASE ─────────────────────────────────────────────────
 const firebaseConfig = {
@@ -29,18 +30,10 @@ const genId = () => "ABCDEFGHJKLMNPQR"[Math.floor(Math.random() * 16)] + (Math.f
 const purgeOldOrders = (orders) => orders.filter((o) => o.date >= SEVEN_DAYS_AGO);
 
 // ─── MASTER DATA (imported from json files) ──────────────────
-const SKU_CATEGORIES   = skuData.categories;
-const SEED_SKUS        = skuData.skus;
-const SEED_BUYERS      = buyerData;
-const SEED_BUYER_GROUPS = [
-  {id:"SD",  name:"Sundry Debtors",     abbr:"SD"},
-  {id:"SC",  name:"Sundry Creditors",   abbr:"SC"},
-  {id:"DIN", name:"Dinesh Channel",     abbr:"DIN"},
-  {id:"VER", name:"Vernit Channel",     abbr:"VER"},
-  {id:"ARC", name:"Architect Channel",  abbr:"ARC"},
-  {id:"OUT", name:"Outstation Debtors", abbr:"OUT"},
-  {id:"LOC", name:"Local Debtors",      abbr:"LOC"},
-];
+const SKU_CATEGORIES    = skuData.categories;
+const SEED_SKUS         = skuData.skus;
+const SEED_BUYERS       = buyerData;
+const SEED_BUYER_GROUPS = buyerGroupData;
 
 // ─── SEED DATA ────────────────────────────────────────────────
 const SEED_USERS = [
