@@ -28,7 +28,7 @@ const cl    = (x) => JSON.parse(JSON.stringify(x));
 const genId = () => "ABCDEFGHJKLMNPQR"[Math.floor(Math.random() * 16)] + (Math.floor(Math.random() * 9) + 1);
 const purgeOldOrders = (orders) => orders.filter((o) => o.date >= SEVEN_DAYS_AGO);
 
-// ─── SKU MASTER DATA (from skus.json) ───────────────────────
+// ─── SKU MASTER DATA (imported from skus.json / buyers.json) ───
 const SKU_CATEGORIES = skuData.categories;
 const SEED_SKUS      = skuData.skus;
 const SEED_BUYERS    = buyerData;
@@ -299,10 +299,9 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut}){
   </div>;
 }
 
-// ─── GOOGLE VISION ────────────────────────────────────────────
-const VISION_API_KEY="AIzaSyDzWLmWrdFDCQyEEyK85U7asCtv2nScywU";
+// ─── GOOGLE VISION (via Vercel serverless proxy) ─────────────
 async function extractOrderFromImage(base64Image,skuList){
-  const res=await fetch(`https://vision.googleapis.com/v1/images:annotate?key=${VISION_API_KEY}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requests:[{image:{content:base64Image},features:[{type:"DOCUMENT_TEXT_DETECTION",maxResults:1}]}]})});
+  const res=await fetch("/api/vision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:base64Image})});
   const data=await res.json();
   const rawText=data.responses?.[0]?.fullTextAnnotation?.text||"";
   return parseOrderText(rawText,skuList);
@@ -495,6 +494,43 @@ function SkuTypeahead({value,onChange,onSelect,onBlur,skuList,placeholder,autoFo
         <span style={{fontFamily:C.mono,fontSize:12,color:C.indigo,fontWeight:600}}>+ Add "{query.trim().toUpperCase()}" as custom SKU</span>
         <span style={{fontFamily:C.mono,fontSize:9,color:"#fff",background:C.indigo,borderRadius:4,padding:"2px 6px",marginLeft:"auto"}}>NEW</span>
       </div>
+    </div>}
+  </div>;
+}
+
+// ─── BUYER TYPEAHEAD ──────────────────────────────────────────
+function BuyerTypeahead({value,onChange,onSelect,placeholder,autoFocus,style={}}){
+  const [open,setOpen]=useState(false);
+  const [query,setQuery]=useState(value||"");
+  const wrapRef=useRef();
+  useEffect(()=>{setQuery(value||"");},[value]);
+  const normQ=query.replace(/\s+/g,"").toUpperCase();
+  const suggestions=query.trim().length>0
+    ?SEED_BUYERS.filter(b=>{
+        const n=b.name.toUpperCase();
+        const aliases=(b.aliases||[]).map(a=>a.toUpperCase());
+        return n.includes(query.toUpperCase())||n.replace(/\s+/g,"").includes(normQ)||aliases.some(a=>a.includes(query.toUpperCase()));
+      }).slice(0,8)
+    :[];
+  const handleChange=e=>{setQuery(e.target.value);onChange&&onChange(e.target.value);setOpen(true);};
+  const handleSelect=b=>{setQuery(b.name);onSelect&&onSelect(b);setOpen(false);};
+  const handleBlur=()=>setTimeout(()=>setOpen(false),150);
+  const handleKeyDown=e=>{
+    if(e.key==="Enter"){e.preventDefault();if(suggestions.length>0)handleSelect(suggestions[0]);else{onSelect&&onSelect({name:query.trim(),aliases:[]});setOpen(false);}}
+    if(e.key==="Escape")setOpen(false);
+  };
+  return <div ref={wrapRef} style={{position:"relative",flex:1,...style}}>
+    <input value={query} onChange={handleChange} onFocus={()=>setOpen(true)} onBlur={handleBlur} onKeyDown={handleKeyDown}
+      autoFocus={autoFocus} placeholder={placeholder||"Type buyer name…"} autoComplete="off" spellCheck={false}
+      style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${query?C.amberBd:C.border}`,fontFamily:C.sans,fontSize:13,color:C.text,background:"#fff",outline:"none",boxSizing:"border-box"}}/>
+    {open&&suggestions.length>0&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,boxShadow:"0 4px 16px rgba(0,0,0,0.12)",zIndex:999,maxHeight:240,overflowY:"auto"}}>
+      {suggestions.map(b=><div key={b.id} onMouseDown={e=>{e.preventDefault();handleSelect(b);}}
+        style={{padding:"10px 14px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}
+        onMouseEnter={e=>e.currentTarget.style.background=C.amberBg}
+        onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+        <span style={{fontFamily:C.sans,fontSize:13,color:C.text}}>{b.name}</span>
+        <span style={{fontFamily:C.mono,fontSize:9,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",flexShrink:0}}>{b.group}</span>
+      </div>)}
     </div>}
   </div>;
 }
@@ -728,8 +764,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
       {stage==="manual"&&<>
         <div style={{marginBottom:14}}>
           <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:5}}>CUSTOMER / SECTION NAME</div>
-          <input value={manualSection} onChange={e=>setManualSection(e.target.value)} placeholder="e.g. Mahavir Traders"
-            style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+          <BuyerTypeahead value={manualSection} onChange={v=>setManualSection(v)} onSelect={b=>setManualSection(b.name)} placeholder="e.g. Mahavir Traders"/>
         </div>
         <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:10}}>ITEMS</div>
         {manualLines.map((line,idx)=>{
@@ -818,7 +853,16 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
           <div style={{fontSize:12,color:C.text}}>{ext.notes}</div>
         </div>}
         {ext.sections.map((sec,sIdx)=><div key={sIdx} style={{marginBottom:20}}>
-          <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.8px",color:C.textDim,marginBottom:8,display:"flex",alignItems:"center",gap:8}}><span style={{color:C.amber}}>§</span>{sec.name.toUpperCase()}</div>
+          <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.8px",color:C.textDim,marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
+            <span style={{color:C.amber}}>§</span>
+            <BuyerTypeahead
+              value={sec.name}
+              onChange={v=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].name=v;return n;})}
+              onSelect={b=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].name=b.name;return n;})}
+              placeholder="Buyer name…"
+              style={{flex:1}}
+            />
+          </div>
           {sec.items.map((item,iIdx)=><ReviewItemRow key={iIdx} item={item} sIdx={sIdx} iIdx={iIdx} onChange={updateItem} onSkip={()=>skipItem(sIdx,iIdx)} skuList={skuList}/>)}
           <button onClick={()=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].items.push({sku:"",qty:1,confidence:0,skipped:false,confirmed:false,custom:false});return n;})}
             style={{width:"100%",padding:"8px",borderRadius:8,border:`1px dashed ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer",fontSize:12,fontFamily:C.sans,marginTop:6}}>
@@ -912,10 +956,12 @@ function EditOrderScreen({order,skuList,onSave,onCancel}){
         {/* Section name */}
         <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
           <span style={{color:C.amber,fontSize:14,flexShrink:0}}>§</span>
-          <input
+          <BuyerTypeahead
             value={sec.name}
-            onChange={e=>updateSecName(sIdx,e.target.value)}
-            style={{flex:1,padding:"7px 10px",borderRadius:8,border:`1px solid ${C.amberBd}`,fontFamily:C.sans,fontSize:13,fontWeight:600,color:C.text,background:"#fff",outline:"none"}}
+            onChange={v=>updateSecName(sIdx,v)}
+            onSelect={b=>updateSecName(sIdx,b.name)}
+            placeholder="Buyer name…"
+            style={{flex:1}}
           />
         </div>
 
@@ -1211,22 +1257,22 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
 }
 
 // ─── ADMIN APP ────────────────────────────────────────────────
-function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched}){
+function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange}){
   const [tab,setTab]=useState("orders");
   const [activeOId,setActiveOId]=useState(null);
   const [expandSku,setExpandSku]=useState(null);
   const [showAdd,setShowAdd]=useState(false);
   const [newName,setNewName]=useState("");
   const [scanning,setScanning]=useState(false);
-  const [editingUser,setEditingUser]=useState(null); // user object
+  const [editingUser,setEditingUser]=useState(null);
   const [editUserName,setEditUserName]=useState("");
   const [selectedOrders,setSelectedOrders]=useState(new Set());
   const toggleOrderSelect=id=>setSelectedOrders(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
   // SKU tab state
-  const [skuPage,setSkuPage]=useState("cats"); // cats | list | modal
+  const [skuPage,setSkuPage]=useState("cats");
   const [activeCat,setActiveCat]=useState(null);
   const [skuSearch,setSkuSearch]=useState("");
-  const [activeSku,setActiveSku]=useState(null); // sku object being edited
+  const [activeSku,setActiveSku]=useState(null);
   const [editSkuId,setEditSkuId]=useState("");
   const [editSkuRate,setEditSkuRate]=useState("");
   const [editSkuCat,setEditSkuCat]=useState("");
@@ -1234,6 +1280,14 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   const [newSkuId,setNewSkuId]=useState("");
   const [newSkuCat,setNewSkuCat]=useState("lam8");
   const [newSkuRate,setNewSkuRate]=useState("");
+  // Buyers tab state
+  const [buyerSearch,setBuyerSearch]=useState("");
+  const [activeBuyer,setActiveBuyer]=useState(null);
+  const [editBuyerName,setEditBuyerName]=useState("");
+  const [editBuyerAlias,setEditBuyerAlias]=useState("");
+  const [showAddBuyer,setShowAddBuyer]=useState(false);
+  const [newBuyerName,setNewBuyerName]=useState("");
+  const [newBuyerGroup,setNewBuyerGroup]=useState("SD");
 
   const activeOrder=orders.find(o=>o.id===activeOId);
 
@@ -1241,7 +1295,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setActiveOId(o.id);setScanning(false);}} skuList={eSkus} catList={catList}/>;
   if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} skuList={eSkus} catList={catList}/>;
 
-  const tabs=[["orders","📋 Orders"],["users","👥 Users"],["skus","🏷 SKUs"],["analytics","📊 Analytics"]];
+  const tabs=[["orders","📋 Orders"],["users","👥 Users"],["skus","🏷 SKUs"],["buyers","👤 Buyers"],["analytics","📊 Analytics"]];
   const tabSt=a=>({flex:1,padding:"8px 4px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:a?700:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
   const today=orders.filter(o=>o.date===TODAY),older=orders.filter(o=>o.date!==TODAY);
 
@@ -1508,6 +1562,77 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
         </div>}
       </>}
 
+      {/* ── BUYERS TAB ── */}
+      {tab==="buyers"&&<>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>BUYERS ({buyerList.length})</div>
+          <Btn onClick={()=>setShowAddBuyer(!showAddBuyer)} color="amber" sx={{padding:"7px 12px",fontSize:12}}>+ Add Buyer</Btn>
+        </div>
+        {showAddBuyer&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW BUYER</div>
+          <div style={{marginBottom:10}}>
+            <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
+            <input value={newBuyerName} onChange={e=>setNewBuyerName(e.target.value)} placeholder="e.g. Mahavir Traders" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+          </div>
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>GROUP</div>
+            <select value={newBuyerGroup} onChange={e=>setNewBuyerGroup(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff"}}>
+              {[["SD","Sundry Debtor"],["SC","Sundry Creditor"],["DIN","Dinesh"],["VER","Vernit"],["ARC","Architect"],["OUT","Outstation"],["LOC","Local"]].map(([v,l])=><option key={v} value={v}>{l}</option>)}
+            </select>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <Btn onClick={()=>{if(!newBuyerName.trim()){alert("Enter a name.");return;}onBuyerChange("add",{id:Date.now(),name:newBuyerName.trim(),group:newBuyerGroup,aliases:[]});setNewBuyerName("");setShowAddBuyer(false);}} color="green" sx={{flex:1,padding:10}}>Add Buyer</Btn>
+            <Btn onClick={()=>setShowAddBuyer(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+          </div>
+        </div>}
+        <input value={buyerSearch} onChange={e=>setBuyerSearch(e.target.value)} placeholder="Search buyers…"
+          style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:14}}/>
+        {activeBuyer&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:100,display:"flex",flexDirection:"column",justifyContent:"flex-end"}}>
+          <div style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",maxHeight:"85%",overflowY:"auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>EDIT BUYER</span>
+              <button onClick={()=>setActiveBuyer(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+            </div>
+            <div style={{marginBottom:12}}>
+              <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:4}}>CANONICAL NAME</div>
+              <input value={editBuyerName} onChange={e=>setEditBuyerName(e.target.value)}
+                style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.amberBd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+            </div>
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:8}}>ALIASES ({(activeBuyer.aliases||[]).length})</div>
+              {(activeBuyer.aliases||[]).map((alias,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                <span style={{flex:1,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,color:C.text,background:C.grayBg}}>{alias}</span>
+                <button onClick={()=>{const updated={...activeBuyer,aliases:activeBuyer.aliases.filter((_,j)=>j!==i)};setActiveBuyer(updated);onBuyerChange("edit",updated);}}
+                  style={{padding:"6px 10px",borderRadius:7,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:12}}>✕</button>
+              </div>)}
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <input value={editBuyerAlias} onChange={e=>setEditBuyerAlias(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&editBuyerAlias.trim()){const updated={...activeBuyer,aliases:[...(activeBuyer.aliases||[]),editBuyerAlias.trim()]};setActiveBuyer(updated);onBuyerChange("edit",updated);setEditBuyerAlias("");}}}
+                  placeholder="Add alias…" style={{flex:1,padding:"8px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff"}}/>
+                <Btn onClick={()=>{if(!editBuyerAlias.trim())return;const updated={...activeBuyer,aliases:[...(activeBuyer.aliases||[]),editBuyerAlias.trim()]};setActiveBuyer(updated);onBuyerChange("edit",updated);setEditBuyerAlias("");}} color="amber" sx={{padding:"8px 12px",fontSize:12}}>Add</Btn>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={()=>{const updated={...activeBuyer,name:editBuyerName.trim()};onBuyerChange("edit",updated);setActiveBuyer(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
+              <Btn onClick={()=>{if(window.confirm(`Delete ${activeBuyer.name}?`)){onBuyerChange("delete",activeBuyer.id);setActiveBuyer(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
+            </div>
+          </div>
+        </div>}
+        {buyerList.filter(b=>!buyerSearch||b.name.toLowerCase().includes(buyerSearch.toLowerCase())||(b.aliases||[]).some(a=>a.toLowerCase().includes(buyerSearch.toLowerCase()))).slice(0,60).map(b=><div key={b.id} onClick={()=>{setActiveBuyer(b);setEditBuyerName(b.name);setEditBuyerAlias("");}}
+          style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between"}}
+          onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+          onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+          <div>
+            <div style={{fontSize:13,fontWeight:600,color:C.text}}>{b.name}</div>
+            {(b.aliases||[]).length>0&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>aka: {b.aliases.join(", ")}</div>}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+            <span style={{fontFamily:C.mono,fontSize:9,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px"}}>{b.group}</span>
+            <span style={{color:C.textDim,fontSize:14}}>›</span>
+          </div>
+        </div>)}
+        {buyerList.filter(b=>!buyerSearch||b.name.toLowerCase().includes(buyerSearch.toLowerCase())).length>60&&<div style={{textAlign:"center",fontSize:12,color:C.textDim,padding:"8px 0"}}>Showing first 60 results — refine your search</div>}
+      </>}
+
       {/* ── ANALYTICS TAB ── */}
       {tab==="analytics"&&<>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:18}}>
@@ -1581,6 +1706,7 @@ export default function App(){
   const [users,setUsers]=useState([]);
   const [skuList,setSkuList]=useState([]);
   const [catList,setCatList]=useState([]);
+  const [buyerList,setBuyerList]=useState([]);
   const [loading,setLoading]=useState(true);
 
   useEffect(()=>{
@@ -1613,6 +1739,13 @@ export default function App(){
       if(val){setCatList(Object.values(val));}
       else{SKU_CATEGORIES.forEach(c=>set(ref(db,`categories/${c.id}`),c));setCatList(SKU_CATEGORIES);}
     });
+    // Buyers listener
+    const buyersRef=ref(db,"buyers");
+    const unsubBuyers=onValue(buyersRef,snap=>{
+      const val=snap.val();
+      if(val){setBuyerList(Object.values(val));}
+      else{SEED_BUYERS.forEach(b=>set(ref(db,`buyers/${b.id}`),b));setBuyerList(SEED_BUYERS);}
+    });
     // Hourly purge
     const purgeInterval=setInterval(()=>{
       setOrders(prev=>{
@@ -1621,7 +1754,7 @@ export default function App(){
         return purged;
       });
     },60*60*1000);
-    return()=>{unsubOrders();unsubUsers();unsubSkus();unsubCats();clearInterval(purgeInterval);};
+    return()=>{unsubOrders();unsubUsers();unsubSkus();unsubCats();unsubBuyers();clearInterval(purgeInterval);};
   },[]);
 
   const staffUser=users.find(u=>u.id===staffId);
@@ -1660,6 +1793,11 @@ export default function App(){
     if(action==="setRate"){const key=payload.skuId.replace(/[^a-zA-Z0-9]/g,"_");const sku=skuList.find(s=>s.id===payload.skuId);if(sku)set(ref(db,`skus/${key}`),{...sku,rate:payload.rate});}
     if(action==="setCatRate"){const cat=catList.find(c=>c.id===payload.catId);if(cat)set(ref(db,`categories/${payload.catId}`),{...cat,rate:payload.rate});}
   };
+  const onBuyerChange=(action,payload)=>{
+    if(action==="add")set(ref(db,`buyers/${payload.id}`),payload);
+    if(action==="edit")set(ref(db,`buyers/${payload.id}`),payload);
+    if(action==="delete")remove(ref(db,`buyers/${payload}`));
+  };
 
   if(loading)return <div style={{minHeight:620,background:"#fff",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
     <div style={{fontFamily:C.mono,fontWeight:700,fontSize:20,color:C.amber}}>ORDER<span style={{color:C.gray}}>FLOW</span></div>
@@ -1673,6 +1811,6 @@ export default function App(){
     if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} onReopen={()=>reopenOrder(activeOrder.id)} skuList={enrichedSkuList} catList={catList}/>;
     return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)}/>;
   }
-  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList}/>;
+  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange}/>;
   return null;
 }
