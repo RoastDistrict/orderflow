@@ -28,10 +28,19 @@ const cl    = (x) => JSON.parse(JSON.stringify(x));
 const genId = () => "ABCDEFGHJKLMNPQR"[Math.floor(Math.random() * 16)] + (Math.floor(Math.random() * 9) + 1);
 const purgeOldOrders = (orders) => orders.filter((o) => o.date >= SEVEN_DAYS_AGO);
 
-// ─── SKU MASTER DATA (imported from skus.json / buyers.json) ───
-const SKU_CATEGORIES = skuData.categories;
-const SEED_SKUS      = skuData.skus;
-const SEED_BUYERS    = buyerData;
+// ─── MASTER DATA (imported from json files) ──────────────────
+const SKU_CATEGORIES   = skuData.categories;
+const SEED_SKUS        = skuData.skus;
+const SEED_BUYERS      = buyerData;
+const SEED_BUYER_GROUPS = [
+  {id:"SD",  name:"Sundry Debtors",     abbr:"SD"},
+  {id:"SC",  name:"Sundry Creditors",   abbr:"SC"},
+  {id:"DIN", name:"Dinesh Channel",     abbr:"DIN"},
+  {id:"VER", name:"Vernit Channel",     abbr:"VER"},
+  {id:"ARC", name:"Architect Channel",  abbr:"ARC"},
+  {id:"OUT", name:"Outstation Debtors", abbr:"OUT"},
+  {id:"LOC", name:"Local Debtors",      abbr:"LOC"},
+];
 
 // ─── SEED DATA ────────────────────────────────────────────────
 const SEED_USERS = [
@@ -1257,7 +1266,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
 }
 
 // ─── ADMIN APP ────────────────────────────────────────────────
-function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange}){
+function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange,buyerGroups,onBuyerGroupChange}){
   const [tab,setTab]=useState("orders");
   const [activeOId,setActiveOId]=useState(null);
   const [expandSku,setExpandSku]=useState(null);
@@ -1285,9 +1294,21 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   const [activeBuyer,setActiveBuyer]=useState(null);
   const [editBuyerName,setEditBuyerName]=useState("");
   const [editBuyerAlias,setEditBuyerAlias]=useState("");
+  const [editBuyerGroup,setEditBuyerGroup]=useState("");
   const [showAddBuyer,setShowAddBuyer]=useState(false);
   const [newBuyerName,setNewBuyerName]=useState("");
   const [newBuyerGroup,setNewBuyerGroup]=useState("SD");
+  // Buyer groups (categories for buyers)
+  const [buyerGroupPage,setBuyerGroupPage]=useState("groups"); // groups | list
+  const [activeBuyerGroup,setActiveBuyerGroup]=useState(null);
+  const [showAddBuyerGroup,setShowAddBuyerGroup]=useState(false);
+  const [newGroupName,setNewGroupName]=useState("");
+  const [newGroupAbbr,setNewGroupAbbr]=useState("");
+  const [editingGroup,setEditingGroup]=useState(null);
+  const [editGroupName,setEditGroupName]=useState("");
+  const [editGroupAbbr,setEditGroupAbbr]=useState("");
+  // Master Data sub-nav
+  const [mdSection,setMdSection]=useState("users"); // users | skus | buyers
 
   const activeOrder=orders.find(o=>o.id===activeOId);
 
@@ -1295,7 +1316,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setActiveOId(o.id);setScanning(false);}} skuList={eSkus} catList={catList}/>;
   if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} skuList={eSkus} catList={catList}/>;
 
-  const tabs=[["orders","📋 Orders"],["users","👥 Users"],["skus","🏷 SKUs"],["buyers","👤 Buyers"],["analytics","📊 Analytics"]];
+  const tabs=[["orders","📋 Orders"],["analytics","📊 Analytics"],["masterdata","⚙️ Master Data"]];
   const tabSt=a=>({flex:1,padding:"8px 4px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:a?700:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
   const today=orders.filter(o=>o.date===TODAY),older=orders.filter(o=>o.date!==TODAY);
 
@@ -1366,273 +1387,324 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
         </>}
       </>}
 
-      {/* ── USERS TAB ── */}
-      {tab==="users"&&<>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
-          <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>STAFF ({users.length})</div>
-          <Btn onClick={()=>setShowAdd(!showAdd)} color="amber" sx={{padding:"7px 12px",fontSize:12}}>+ Add Staff</Btn>
+      {/* ── MASTER DATA TAB ── */}
+      {tab==="masterdata"&&<>
+        {/* Sub-nav */}
+        <div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:16}}>
+          {[["users","👥 Users"],["skus","🏷 SKUs"],["buyers","👤 Buyers"]].map(([k,l])=><button key={k} onClick={()=>setMdSection(k)} style={{flex:1,padding:"7px 4px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:mdSection===k?700:400,background:mdSection===k?"#fff":"transparent",color:mdSection===k?C.text:C.textDim,boxShadow:mdSection===k?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>{l}</button>)}
         </div>
-        {showAdd&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW STAFF MEMBER</div>
-          <div style={{marginBottom:14}}>
-            <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
-            <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="Staff name" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
-          </div>
-          <div style={{display:"flex",gap:8}}>
-            <Btn onClick={()=>{if(!newName.trim()){alert("Enter a name.");return;}onUserChange("add",{id:Date.now(),name:newName.trim(),active:true,itemsHandled:0,ordersToday:0,lastSeen:"Never"});setNewName("");setShowAdd(false);}} color="green" sx={{flex:1,padding:10}}>Create Account</Btn>
-            <Btn onClick={()=>setShowAdd(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
-          </div>
-        </div>}
-        {users.map(u=>{
-          const ac=u.active,c=ac?C.green:C.red,bg=ac?C.greenBg:C.redBg,bd=ac?C.greenBd:C.redBd;
-          return <div key={u.id} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:10,boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>
-            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
-              <div style={{width:40,height:40,borderRadius:20,background:bg,border:`1px solid ${bd}`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:16,color:c}}>{u.name[0]}</div>
-              <div style={{flex:1}}><div style={{fontWeight:700,fontSize:14,color:C.text}}>{u.name}</div><div style={{fontSize:11,color:C.textDim}}>Last seen: {u.lastSeen}</div></div>
-              <span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:4,background:bg,color:c,border:`1px solid ${bd}`}}>{ac?"ACTIVE":"INACTIVE"}</span>
-            </div>
-            <div style={{display:"flex",gap:6,paddingTop:10,borderTop:"1px solid #F3F4F6"}}>
-              <div style={{flex:1,textAlign:"center"}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.text}}>{u.itemsHandled}</div><div style={{fontSize:10,color:C.textDim}}>items today</div></div>
-              <div style={{flex:1,textAlign:"center",borderLeft:"1px solid #F3F4F6"}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.text}}>{u.ordersToday}</div><div style={{fontSize:10,color:C.textDim}}>orders today</div></div>
-              <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"flex-end",gap:6,borderLeft:"1px solid #F3F4F6",paddingLeft:8}}>
-                <Btn onClick={()=>{setEditingUser(u);setEditUserName(u.name);}} color="ghost" sx={{padding:"5px 10px",fontSize:11}}>Edit</Btn>
-                <Btn onClick={()=>onUserChange("toggle",u.id)} color={ac?"redO":"greenO"} sx={{padding:"5px 10px",fontSize:11}}>{ac?"Deactivate":"Activate"}</Btn>
-              </div>
-            </div>
-          </div>;
-        })}
 
-        {/* Edit user modal */}
-        {editingUser&&<div onClick={e=>{if(e.target===e.currentTarget)setEditingUser(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-          <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
-              <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT STAFF</span>
-              <button onClick={()=>setEditingUser(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
-            </div>
-            <div style={{marginBottom:16}}>
-              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
-              <input value={editUserName} onChange={e=>setEditUserName(e.target.value)}
-                style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
-            </div>
-            <div style={{display:"flex",gap:8}}>
-              <Btn onClick={()=>{
-                if(!editUserName.trim()){alert("Name cannot be empty.");return;}
-                onUserChange("edit",{...editingUser,name:editUserName.trim()});
-                setEditingUser(null);
-              }} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save</Btn>
-              <Btn onClick={()=>{
-                if(window.confirm(`Delete ${editingUser.name}? This cannot be undone.`)){
-                  onUserChange("delete",editingUser.id);setEditingUser(null);
-                }
-              }} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
-            </div>
-          </div>
-        </div>}
-      </>}
-
-      {/* ── SKUS TAB ── */}
-      {tab==="skus"&&<>
-
-        {/* ── PAGE: CATEGORY CARDS ── */}
-        {skuPage==="cats"&&<>
+        {/* USERS SECTION */}
+        {mdSection==="users"&&<>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
-            <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>SKU CATEGORIES ({catList.length})</div>
-            <Btn onClick={()=>setShowAddSku(!showAddSku)} color="amber" sx={{padding:"6px 12px",fontSize:11}}>+ Add SKU</Btn>
+            <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>STAFF ({users.length})</div>
+            <Btn onClick={()=>setShowAdd(!showAdd)} color="amber" sx={{padding:"7px 12px",fontSize:12}}>+ Add Staff</Btn>
           </div>
-
-          {showAddSku&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
-            <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW SKU</div>
-            <div style={{marginBottom:10}}>
-              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>SKU CODE</div>
-              <input value={newSkuId} onChange={e=>setNewSkuId(e.target.value)} placeholder="e.g. HG 9999" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
-            </div>
-            <div style={{marginBottom:10}}>
-              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>CATEGORY</div>
-              <select value={newSkuCat} onChange={e=>setNewSkuCat(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}>
-                {catList.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </div>
+          {showAdd&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW STAFF MEMBER</div>
             <div style={{marginBottom:14}}>
-              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>RATE (₹)</div>
-              <input type="number" value={newSkuRate} onChange={e=>setNewSkuRate(e.target.value)} placeholder="Enter rate" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
+              <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="Staff name" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
             </div>
             <div style={{display:"flex",gap:8}}>
-              <Btn onClick={()=>{
-                if(!newSkuId.trim()){alert("Enter a SKU code.");return;}
-                const sku={id:newSkuId.trim().toUpperCase(),cat:newSkuCat,rate:newSkuRate?parseInt(newSkuRate):undefined};
-                onSkuChange("add",sku);setNewSkuId("");setNewSkuRate("");setShowAddSku(false);
-              }} color="green" sx={{flex:1,padding:10}}>Add SKU</Btn>
-              <Btn onClick={()=>setShowAddSku(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              <Btn onClick={()=>{if(!newName.trim()){alert("Enter a name.");return;}onUserChange("add",{id:Date.now(),name:newName.trim(),active:true,itemsHandled:0,ordersToday:0,lastSeen:"Never"});setNewName("");setShowAdd(false);}} color="green" sx={{flex:1,padding:10}}>Create Account</Btn>
+              <Btn onClick={()=>setShowAdd(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
             </div>
           </div>}
-
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-            {catList.map(cat=>{
-              const count=skuList.filter(s=>s.cat===cat.id).length;
-              return <div key={cat.id} onClick={()=>{setActiveCat(cat);setSkuSearch("");setSkuPage("list");}}
-                style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",cursor:"pointer",boxShadow:"0 1px 3px rgba(0,0,0,0.05)",transition:"border-color .15s"}}
-                onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
-                onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
-                <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:4,lineHeight:1.3}}>{cat.name}</div>
-                <div style={{display:"flex",alignItems:"center",marginTop:8}}>
-                  <span style={{fontFamily:C.mono,fontSize:11,color:C.textDim}}>{count} SKUs</span>
-                </div>
-              </div>;
-            })}
-          </div>
-        </>}
-
-        {/* ── PAGE: SKU LIST ── */}
-        {skuPage==="list"&&activeCat&&<>
-          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
-            <button onClick={()=>{setSkuPage("cats");setSkuSearch("");}} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:0,lineHeight:1}}>←</button>
-            <div style={{flex:1}}>
-              <div style={{fontWeight:700,fontSize:15,color:C.text}}>{activeCat.name}</div>
-              <div style={{fontSize:11,color:C.textDim}}>{skuList.filter(s=>s.cat===activeCat.id).length} SKUs</div>
-            </div>
-            <span style={{fontFamily:C.mono,fontSize:11,color:C.textDim}}>{skuList.filter(s=>s.cat===activeCat.id).length} SKUs</span>
-          </div>
-          <input value={skuSearch} onChange={e=>setSkuSearch(e.target.value)} placeholder={`Search in ${activeCat.name}…`} style={{width:"100%",padding:"10px 14px",borderRadius:10,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}/>
-          <div style={{fontSize:11,color:C.textDim,marginBottom:10}}>{filteredSkus.length} SKUs</div>
-          {filteredSkus.slice(0,150).map(sku=>{
-            const effectiveRate=sku.rate!==undefined?sku.rate:1;
-            return <div key={sku.id} onClick={()=>{setActiveSku(sku);setEditSkuId(sku.id);setEditSkuRate(String(sku.rate!==undefined?sku.rate:""));setEditSkuCat(sku.cat);}}
-              style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 14px",marginBottom:6,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
-              onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
-              onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
-              <div style={{flex:1}}>
-                <div style={{fontFamily:C.mono,fontWeight:600,fontSize:13,color:C.text}}>{sku.id}</div>
-                {sku.name&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>{sku.name}</div>}
+          {users.map(u=>{
+            const ac=u.active,c=ac?C.green:C.red,bg=ac?C.greenBg:C.redBg,bd=ac?C.greenBd:C.redBd;
+            return <div key={u.id} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:10,boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+                <div style={{width:40,height:40,borderRadius:20,background:bg,border:`1px solid ${bd}`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:16,color:c}}>{u.name[0]}</div>
+                <div style={{flex:1}}><div style={{fontWeight:700,fontSize:14,color:C.text}}>{u.name}</div><div style={{fontSize:11,color:C.textDim}}>Last seen: {u.lastSeen}</div></div>
+                <span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:4,background:bg,color:c,border:`1px solid ${bd}`}}>{ac?"ACTIVE":"INACTIVE"}</span>
               </div>
-              <div style={{display:"flex",alignItems:"center",gap:8}}>
-                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:sku.rate!==undefined?C.amber:C.textDim}}>₹{effectiveRate?.toLocaleString("en-IN")||"—"}</span>
-
-                <span style={{color:C.textDim,fontSize:14}}>›</span>
+              <div style={{display:"flex",gap:6,paddingTop:10,borderTop:"1px solid #F3F4F6"}}>
+                <div style={{flex:1,textAlign:"center"}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.text}}>{u.itemsHandled}</div><div style={{fontSize:10,color:C.textDim}}>items today</div></div>
+                <div style={{flex:1,textAlign:"center",borderLeft:"1px solid #F3F4F6"}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.text}}>{u.ordersToday}</div><div style={{fontSize:10,color:C.textDim}}>orders today</div></div>
+                <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"flex-end",gap:6,borderLeft:"1px solid #F3F4F6",paddingLeft:8}}>
+                  <Btn onClick={()=>{setEditingUser(u);setEditUserName(u.name);}} color="ghost" sx={{padding:"5px 10px",fontSize:11}}>Edit</Btn>
+                  <Btn onClick={()=>onUserChange("toggle",u.id)} color={ac?"redO":"greenO"} sx={{padding:"5px 10px",fontSize:11}}>{ac?"Deactivate":"Activate"}</Btn>
+                </div>
               </div>
             </div>;
           })}
-          {filteredSkus.length>150&&<div style={{textAlign:"center",color:C.textDim,fontSize:12,padding:"10px 0"}}>Showing 150 of {filteredSkus.length} — type to search</div>}
-          {filteredSkus.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"40px 0",fontSize:13}}>No SKUs found.</div>}
-        </>}
-
-        {/* ── MODAL: EDIT SKU ── */}
-        {activeSku&&<div onClick={e=>{if(e.target===e.currentTarget){setActiveSku(null);}}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-          <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
-              <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT SKU</span>
-              <button onClick={()=>setActiveSku(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
-            </div>
-
-            <div style={{marginBottom:12}}>
-              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>SKU CODE</div>
-              <input value={editSkuId} onChange={e=>setEditSkuId(e.target.value)}
-                style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
-            </div>
-
-            <div style={{marginBottom:12}}>
-              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>RATE (₹ per sheet)</div>
-              <input type="number" value={editSkuRate} onChange={e=>setEditSkuRate(e.target.value)}
-                placeholder="Enter rate (₹)"
-                style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
-              {editSkuRate&&<div style={{fontSize:11,color:C.amber,marginTop:4}}>Custom rate: ₹{parseInt(editSkuRate).toLocaleString("en-IN")} · overrides category default</div>}
-              {!editSkuRate&&<div style={{fontSize:11,color:C.textDim,marginTop:4}}>Leave blank to use category default rate</div>}
-            </div>
-
-            <div style={{marginBottom:20}}>
-              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>CATEGORY</div>
-              <select value={editSkuCat} onChange={e=>setEditSkuCat(e.target.value)}
-                style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}>
-                {catList.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </div>
-
-            <div style={{display:"flex",gap:8}}>
-              <Btn onClick={()=>{
-                const updates={...activeSku,id:editSkuId.trim().toUpperCase(),cat:editSkuCat};
-                if(editSkuRate)updates.rate=parseInt(editSkuRate);
-                else delete updates.rate;
-                // delete old if id changed
-                if(updates.id!==activeSku.id)onSkuChange("delete",activeSku.id);
-                onSkuChange("add",updates);
-                setActiveSku(null);
-              }} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
-              <Btn onClick={()=>{if(window.confirm(`Delete ${activeSku.id}?`)){onSkuChange("delete",activeSku.id);setActiveSku(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
-            </div>
-          </div>
-        </div>}
-      </>}
-
-      {/* ── BUYERS TAB ── */}
-      {tab==="buyers"&&<>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
-          <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>BUYERS ({buyerList.length})</div>
-          <Btn onClick={()=>setShowAddBuyer(!showAddBuyer)} color="amber" sx={{padding:"7px 12px",fontSize:12}}>+ Add Buyer</Btn>
-        </div>
-        {showAddBuyer&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
-          <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW BUYER</div>
-          <div style={{marginBottom:10}}>
-            <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
-            <input value={newBuyerName} onChange={e=>setNewBuyerName(e.target.value)} placeholder="e.g. Mahavir Traders" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
-          </div>
-          <div style={{marginBottom:14}}>
-            <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>GROUP</div>
-            <select value={newBuyerGroup} onChange={e=>setNewBuyerGroup(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff"}}>
-              {[["SD","Sundry Debtor"],["SC","Sundry Creditor"],["DIN","Dinesh"],["VER","Vernit"],["ARC","Architect"],["OUT","Outstation"],["LOC","Local"]].map(([v,l])=><option key={v} value={v}>{l}</option>)}
-            </select>
-          </div>
-          <div style={{display:"flex",gap:8}}>
-            <Btn onClick={()=>{if(!newBuyerName.trim()){alert("Enter a name.");return;}onBuyerChange("add",{id:Date.now(),name:newBuyerName.trim(),group:newBuyerGroup,aliases:[]});setNewBuyerName("");setShowAddBuyer(false);}} color="green" sx={{flex:1,padding:10}}>Add Buyer</Btn>
-            <Btn onClick={()=>setShowAddBuyer(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
-          </div>
-        </div>}
-        <input value={buyerSearch} onChange={e=>setBuyerSearch(e.target.value)} placeholder="Search buyers…"
-          style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:14}}/>
-        {activeBuyer&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.4)",zIndex:100,display:"flex",flexDirection:"column",justifyContent:"flex-end"}}>
-          <div style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",maxHeight:"85%",overflowY:"auto"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-              <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>EDIT BUYER</span>
-              <button onClick={()=>setActiveBuyer(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
-            </div>
-            <div style={{marginBottom:12}}>
-              <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:4}}>CANONICAL NAME</div>
-              <input value={editBuyerName} onChange={e=>setEditBuyerName(e.target.value)}
-                style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.amberBd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
-            </div>
-            <div style={{marginBottom:16}}>
-              <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:8}}>ALIASES ({(activeBuyer.aliases||[]).length})</div>
-              {(activeBuyer.aliases||[]).map((alias,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                <span style={{flex:1,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,color:C.text,background:C.grayBg}}>{alias}</span>
-                <button onClick={()=>{const updated={...activeBuyer,aliases:activeBuyer.aliases.filter((_,j)=>j!==i)};setActiveBuyer(updated);onBuyerChange("edit",updated);}}
-                  style={{padding:"6px 10px",borderRadius:7,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:12}}>✕</button>
-              </div>)}
-              <div style={{display:"flex",gap:8,marginTop:8}}>
-                <input value={editBuyerAlias} onChange={e=>setEditBuyerAlias(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&editBuyerAlias.trim()){const updated={...activeBuyer,aliases:[...(activeBuyer.aliases||[]),editBuyerAlias.trim()]};setActiveBuyer(updated);onBuyerChange("edit",updated);setEditBuyerAlias("");}}}
-                  placeholder="Add alias…" style={{flex:1,padding:"8px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff"}}/>
-                <Btn onClick={()=>{if(!editBuyerAlias.trim())return;const updated={...activeBuyer,aliases:[...(activeBuyer.aliases||[]),editBuyerAlias.trim()]};setActiveBuyer(updated);onBuyerChange("edit",updated);setEditBuyerAlias("");}} color="amber" sx={{padding:"8px 12px",fontSize:12}}>Add</Btn>
+          {editingUser&&<div onClick={e=>{if(e.target===e.currentTarget)setEditingUser(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT STAFF</span>
+                <button onClick={()=>setEditingUser(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
+                <input value={editUserName} onChange={e=>setEditUserName(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{if(!editUserName.trim()){alert("Name cannot be empty.");return;}onUserChange("edit",{...editingUser,name:editUserName.trim()});setEditingUser(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save</Btn>
+                <Btn onClick={()=>{if(window.confirm(`Delete ${editingUser.name}? This cannot be undone.`)){onUserChange("delete",editingUser.id);setEditingUser(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
               </div>
             </div>
-            <div style={{display:"flex",gap:8}}>
-              <Btn onClick={()=>{const updated={...activeBuyer,name:editBuyerName.trim()};onBuyerChange("edit",updated);setActiveBuyer(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
-              <Btn onClick={()=>{if(window.confirm(`Delete ${activeBuyer.name}?`)){onBuyerChange("delete",activeBuyer.id);setActiveBuyer(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
+          </div>}
+        </>}
+
+        {/* SKUS SECTION */}
+        {mdSection==="skus"&&<>
+          {skuPage==="cats"&&<>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>SKU CATEGORIES ({catList.length})</div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>setShowAddSku(!showAddSku)} color="ghost" sx={{padding:"6px 12px",fontSize:11}}>+ Add SKU</Btn>
+                <Btn onClick={()=>{setShowAddSku(false);setSkuPage("addcat");}} color="amber" sx={{padding:"6px 12px",fontSize:11}}>+ Category</Btn>
+              </div>
             </div>
-          </div>
-        </div>}
-        {buyerList.filter(b=>!buyerSearch||b.name.toLowerCase().includes(buyerSearch.toLowerCase())||(b.aliases||[]).some(a=>a.toLowerCase().includes(buyerSearch.toLowerCase()))).slice(0,60).map(b=><div key={b.id} onClick={()=>{setActiveBuyer(b);setEditBuyerName(b.name);setEditBuyerAlias("");}}
-          style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between"}}
-          onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
-          onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
-          <div>
-            <div style={{fontSize:13,fontWeight:600,color:C.text}}>{b.name}</div>
-            {(b.aliases||[]).length>0&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>aka: {b.aliases.join(", ")}</div>}
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
-            <span style={{fontFamily:C.mono,fontSize:9,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px"}}>{b.group}</span>
-            <span style={{color:C.textDim,fontSize:14}}>›</span>
-          </div>
-        </div>)}
-        {buyerList.filter(b=>!buyerSearch||b.name.toLowerCase().includes(buyerSearch.toLowerCase())).length>60&&<div style={{textAlign:"center",fontSize:12,color:C.textDim,padding:"8px 0"}}>Showing first 60 results — refine your search</div>}
+            {showAddSku&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW SKU</div>
+              <div style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>SKU CODE</div>
+                <input value={newSkuId} onChange={e=>setNewSkuId(e.target.value)} placeholder="e.g. HG 9999" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>CATEGORY</div>
+                <select value={newSkuCat} onChange={e=>setNewSkuCat(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}>
+                  {catList.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>RATE (Rs)</div>
+                <input type="number" value={newSkuRate} onChange={e=>setNewSkuRate(e.target.value)} placeholder="Enter rate" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{if(!newSkuId.trim()){alert("Enter a SKU code.");return;}const sku={id:newSkuId.trim().toUpperCase(),cat:newSkuCat,rate:newSkuRate?parseInt(newSkuRate):undefined};onSkuChange("add",sku);setNewSkuId("");setNewSkuRate("");setShowAddSku(false);}} color="green" sx={{flex:1,padding:10}}>Add SKU</Btn>
+                <Btn onClick={()=>setShowAddSku(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              </div>
+            </div>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {catList.map(cat=>{
+                const count=skuList.filter(s=>s.cat===cat.id).length;
+                return <div key={cat.id} onClick={()=>{setActiveCat(cat);setSkuSearch("");setSkuPage("list");}}
+                  style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",cursor:"pointer",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                  <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:4,lineHeight:1.3}}>{cat.name}</div>
+                  <div style={{fontSize:11,color:C.textDim}}>Rs{cat.rate?.toLocaleString("en-IN")||"--"} default · {count} SKUs</div>
+                </div>;
+              })}
+            </div>
+          </>}
+          {skuPage==="addcat"&&<>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+              <button onClick={()=>setSkuPage("cats")} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:0,lineHeight:1}}>←</button>
+              <span style={{fontWeight:700,fontSize:15,color:C.text}}>New SKU Category</span>
+            </div>
+            <div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16}}>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>CATEGORY NAME</div>
+                <input value={newGroupName} onChange={e=>setNewGroupName(e.target.value)} placeholder="e.g. 2mm Board" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>DEFAULT RATE (Rs)</div>
+                <input type="number" value={newSkuRate} onChange={e=>setNewSkuRate(e.target.value)} placeholder="e.g. 800" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{
+                  if(!newGroupName.trim()){alert("Enter a category name.");return;}
+                  const id=newGroupName.trim().toLowerCase().replace(/[^a-z0-9]/g,"");
+                  set(ref(db,"categories/"+id),{id,name:newGroupName.trim(),rate:newSkuRate?parseInt(newSkuRate):0});
+                  setNewGroupName("");setNewSkuRate("");setSkuPage("cats");
+                }} color="green" sx={{flex:1,padding:10}}>Create Category</Btn>
+                <Btn onClick={()=>setSkuPage("cats")} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              </div>
+            </div>
+          </>}
+          {skuPage==="list"&&activeCat&&<>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+              <button onClick={()=>{setSkuPage("cats");setSkuSearch("");}} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:0,lineHeight:1}}>←</button>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:15,color:C.text}}>{activeCat.name}</div>
+                <div style={{fontSize:11,color:C.textDim}}>Rs{activeCat.rate?.toLocaleString("en-IN")||"--"} default · {skuList.filter(s=>s.cat===activeCat.id).length} SKUs</div>
+              </div>
+              <Btn onClick={()=>{
+                const count=skuList.filter(s=>s.cat===activeCat.id).length;
+                if(count>0){alert("Cannot delete -- "+count+" SKU"+(count>1?"s":"")+" in this category. Move or delete them first.");return;}
+                if(window.confirm("Delete category "+activeCat.name+"?")){remove(ref(db,"categories/"+activeCat.id));setSkuPage("cats");}
+              }} color="danger" sx={{padding:"6px 10px",fontSize:11}}>Delete Category</Btn>
+            </div>
+            <input value={skuSearch} onChange={e=>setSkuSearch(e.target.value)} placeholder={"Search in "+activeCat.name+"..."} style={{width:"100%",padding:"10px 14px",borderRadius:10,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}/>
+            <div style={{fontSize:11,color:C.textDim,marginBottom:10}}>{filteredSkus.length} SKUs</div>
+            {filteredSkus.slice(0,150).map(sku=>{
+              const effectiveRate=sku.rate!==undefined?sku.rate:activeCat.rate;
+              return <div key={sku.id} onClick={()=>{setActiveSku(sku);setEditSkuId(sku.id);setEditSkuRate(String(sku.rate!==undefined?sku.rate:""));setEditSkuCat(sku.cat);}}
+                style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 14px",marginBottom:6,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
+                onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+                onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                <div style={{flex:1}}><div style={{fontFamily:C.mono,fontWeight:600,fontSize:13,color:C.text}}>{sku.id}</div></div>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:sku.rate!==undefined?C.amber:C.textDim}}>Rs{effectiveRate?.toLocaleString("en-IN")||"--"}</span>
+                <span style={{color:C.textDim,fontSize:14}}>›</span>
+              </div>;
+            })}
+            {filteredSkus.length>150&&<div style={{textAlign:"center",color:C.textDim,fontSize:12,padding:"10px 0"}}>Showing 150 of {filteredSkus.length} -- type to search</div>}
+            {filteredSkus.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"40px 0",fontSize:13}}>No SKUs found.</div>}
+          </>}
+          {activeSku&&<div onClick={e=>{if(e.target===e.currentTarget)setActiveSku(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT SKU</span>
+                <button onClick={()=>setActiveSku(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>SKU CODE</div>
+                <input value={editSkuId} onChange={e=>setEditSkuId(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>CATEGORY</div>
+                <select value={editSkuCat} onChange={e=>setEditSkuCat(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}>
+                  {catList.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>RATE (Rs per sheet)</div>
+                <input type="number" value={editSkuRate} onChange={e=>setEditSkuRate(e.target.value)} placeholder="Leave blank for category default" style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+                <div style={{fontSize:11,color:editSkuRate?C.amber:C.textDim,marginTop:4}}>{editSkuRate?"Custom rate overrides category default":"Blank = use category default"}</div>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{const updates={...activeSku,id:editSkuId.trim().toUpperCase(),cat:editSkuCat};if(editSkuRate)updates.rate=parseInt(editSkuRate);else delete updates.rate;if(updates.id!==activeSku.id)onSkuChange("delete",activeSku.id);onSkuChange("add",updates);setActiveSku(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
+                <Btn onClick={()=>{if(window.confirm("Delete "+activeSku.id+"?")){onSkuChange("delete",activeSku.id);setActiveSku(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
+              </div>
+            </div>
+          </div>}
+        </>}
+
+        {/* BUYERS SECTION */}
+        {mdSection==="buyers"&&<>
+          {buyerGroupPage==="groups"&&<>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>BUYER GROUPS ({buyerGroups.length})</div>
+              <Btn onClick={()=>setShowAddBuyerGroup(!showAddBuyerGroup)} color="amber" sx={{padding:"6px 12px",fontSize:11}}>+ Group</Btn>
+            </div>
+            {showAddBuyerGroup&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW BUYER GROUP</div>
+              <div style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>FULL NAME</div>
+                <input value={newGroupName} onChange={e=>setNewGroupName(e.target.value)} placeholder="e.g. Export Clients" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>ABBREVIATION</div>
+                <input value={newGroupAbbr} onChange={e=>setNewGroupAbbr(e.target.value.toUpperCase())} placeholder="e.g. EXP" maxLength={6} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{if(!newGroupName.trim()||!newGroupAbbr.trim()){alert("Enter both name and abbreviation.");return;}const id=newGroupAbbr.trim().toUpperCase();onBuyerGroupChange("add",{id,name:newGroupName.trim(),abbr:id});setNewGroupName("");setNewGroupAbbr("");setShowAddBuyerGroup(false);}} color="green" sx={{flex:1,padding:10}}>Create Group</Btn>
+                <Btn onClick={()=>setShowAddBuyerGroup(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              </div>
+            </div>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {buyerGroups.map(grp=>{
+                const count=buyerList.filter(b=>b.group===grp.id).length;
+                return <div key={grp.id} onClick={()=>{setActiveBuyerGroup(grp);setBuyerSearch("");setBuyerGroupPage("list");}}
+                  style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",cursor:"pointer",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                  <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:2}}>{grp.name}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:6}}>
+                    <span style={{fontFamily:C.mono,fontSize:10,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px"}}>{grp.abbr}</span>
+                    <span style={{fontSize:11,color:C.textDim}}>{count} buyers</span>
+                  </div>
+                </div>;
+              })}
+            </div>
+          </>}
+          {buyerGroupPage==="list"&&activeBuyerGroup&&<>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+              <button onClick={()=>{setBuyerGroupPage("groups");setBuyerSearch("");}} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:0,lineHeight:1}}>←</button>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:15,color:C.text}}>{activeBuyerGroup.name}</div>
+                <div style={{fontSize:11,color:C.textDim}}>{buyerList.filter(b=>b.group===activeBuyerGroup.id).length} buyers <span style={{fontFamily:C.mono}}>· {activeBuyerGroup.abbr}</span></div>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <Btn onClick={()=>{setEditingGroup(activeBuyerGroup);setEditGroupName(activeBuyerGroup.name);setEditGroupAbbr(activeBuyerGroup.abbr);}} color="ghost" sx={{padding:"6px 10px",fontSize:11}}>Edit</Btn>
+                <Btn onClick={()=>{const count=buyerList.filter(b=>b.group===activeBuyerGroup.id).length;if(count>0){alert("Cannot delete -- "+count+" buyer"+(count>1?"s":"")+" in this group. Move or delete them first.");return;}if(window.confirm("Delete group "+activeBuyerGroup.name+"?")){onBuyerGroupChange("delete",activeBuyerGroup.id);setBuyerGroupPage("groups");}}} color="danger" sx={{padding:"6px 10px",fontSize:11}}>Delete</Btn>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8,marginBottom:14}}>
+              <input value={buyerSearch} onChange={e=>setBuyerSearch(e.target.value)} placeholder="Search buyers..." style={{flex:1,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              <Btn onClick={()=>{setShowAddBuyer(true);setNewBuyerGroup(activeBuyerGroup.id);}} color="amber" sx={{padding:"9px 12px",fontSize:12,flexShrink:0}}>+ Buyer</Btn>
+            </div>
+            {showAddBuyer&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW BUYER</div>
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
+                <input value={newBuyerName} onChange={e=>setNewBuyerName(e.target.value)} placeholder="e.g. Mahavir Traders" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{if(!newBuyerName.trim()){alert("Enter a name.");return;}onBuyerChange("add",{id:Date.now(),name:newBuyerName.trim(),group:newBuyerGroup,aliases:[]});setNewBuyerName("");setShowAddBuyer(false);}} color="green" sx={{flex:1,padding:10}}>Add Buyer</Btn>
+                <Btn onClick={()=>setShowAddBuyer(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              </div>
+            </div>}
+            {buyerList.filter(b=>b.group===activeBuyerGroup.id&&(!buyerSearch||b.name.toLowerCase().includes(buyerSearch.toLowerCase())||(b.aliases||[]).some(a=>a.toLowerCase().includes(buyerSearch.toLowerCase())))).map(b=><div key={b.id}
+              onClick={()=>{setActiveBuyer(b);setEditBuyerName(b.name);setEditBuyerGroup(b.group);setEditBuyerAlias("");}}
+              style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between"}}
+              onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+              onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+              <div>
+                <div style={{fontSize:13,fontWeight:600,color:C.text}}>{b.name}</div>
+                {(b.aliases||[]).length>0&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>aka: {b.aliases.join(", ")}</div>}
+              </div>
+              <span style={{color:C.textDim,fontSize:14}}>›</span>
+            </div>)}
+          </>}
+          {editingGroup&&<div onClick={e=>{if(e.target===e.currentTarget)setEditingGroup(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT GROUP</span>
+                <button onClick={()=>setEditingGroup(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>FULL NAME</div>
+                <input value={editGroupName} onChange={e=>setEditGroupName(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>ABBREVIATION</div>
+                <input value={editGroupAbbr} onChange={e=>setEditGroupAbbr(e.target.value.toUpperCase())} maxLength={6} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <Btn onClick={()=>{onBuyerGroupChange("edit",{...editingGroup,name:editGroupName.trim(),abbr:editGroupAbbr.trim()});setActiveBuyerGroup({...editingGroup,name:editGroupName.trim(),abbr:editGroupAbbr.trim()});setEditingGroup(null);}} color="green" sx={{width:"100%",padding:12,fontSize:14}}>Save Changes</Btn>
+            </div>
+          </div>}
+          {activeBuyer&&<div onClick={e=>{if(e.target===e.currentTarget)setActiveBuyer(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,maxHeight:"85vh",overflowY:"auto",boxSizing:"border-box"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>EDIT BUYER</span>
+                <button onClick={()=>setActiveBuyer(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:4}}>CANONICAL NAME</div>
+                <input value={editBuyerName} onChange={e=>setEditBuyerName(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.amberBd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:4}}>GROUP</div>
+                <select value={editBuyerGroup} onChange={e=>setEditBuyerGroup(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff"}}>
+                  {buyerGroups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.abbr}</option>)}
+                </select>
+              </div>
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:8}}>ALIASES ({(activeBuyer.aliases||[]).length})</div>
+                {(activeBuyer.aliases||[]).map((alias,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                  <span style={{flex:1,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,color:C.text,background:C.grayBg}}>{alias}</span>
+                  <button onClick={()=>{const updated={...activeBuyer,aliases:activeBuyer.aliases.filter((_,j)=>j!==i)};setActiveBuyer(updated);onBuyerChange("edit",updated);}} style={{padding:"6px 10px",borderRadius:7,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:12}}>✕</button>
+                </div>)}
+                <div style={{display:"flex",gap:8,marginTop:8}}>
+                  <input value={editBuyerAlias} onChange={e=>setEditBuyerAlias(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&editBuyerAlias.trim()){const updated={...activeBuyer,aliases:[...(activeBuyer.aliases||[]),editBuyerAlias.trim()]};setActiveBuyer(updated);onBuyerChange("edit",updated);setEditBuyerAlias("");}}} placeholder="Add alias..." style={{flex:1,padding:"8px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff"}}/>
+                  <Btn onClick={()=>{if(!editBuyerAlias.trim())return;const updated={...activeBuyer,aliases:[...(activeBuyer.aliases||[]),editBuyerAlias.trim()]};setActiveBuyer(updated);onBuyerChange("edit",updated);setEditBuyerAlias("");}} color="amber" sx={{padding:"8px 12px",fontSize:12}}>Add</Btn>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{const updated={...activeBuyer,name:editBuyerName.trim(),group:editBuyerGroup};onBuyerChange("edit",updated);setActiveBuyer(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
+                <Btn onClick={()=>{if(window.confirm("Delete "+activeBuyer.name+"?")){onBuyerChange("delete",activeBuyer.id);setActiveBuyer(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
+              </div>
+            </div>
+          </div>}
+        </>}
       </>}
 
+      {/* ── ANALYTICS TAB ── */}
       {/* ── ANALYTICS TAB ── */}
       {tab==="analytics"&&<>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:18}}>
@@ -1707,6 +1779,7 @@ export default function App(){
   const [skuList,setSkuList]=useState([]);
   const [catList,setCatList]=useState([]);
   const [buyerList,setBuyerList]=useState([]);
+  const [buyerGroups,setBuyerGroups]=useState([]);
   const [loading,setLoading]=useState(true);
 
   useEffect(()=>{
@@ -1746,6 +1819,13 @@ export default function App(){
       if(val){setBuyerList(Object.values(val));}
       else{SEED_BUYERS.forEach(b=>set(ref(db,`buyers/${b.id}`),b));setBuyerList(SEED_BUYERS);}
     });
+    // Buyer groups listener
+    const buyerGroupsRef=ref(db,"buyerGroups");
+    const unsubBuyerGroups=onValue(buyerGroupsRef,snap=>{
+      const val=snap.val();
+      if(val){setBuyerGroups(Object.values(val));}
+      else{SEED_BUYER_GROUPS.forEach(g=>set(ref(db,`buyerGroups/${g.id}`),g));setBuyerGroups(SEED_BUYER_GROUPS);}
+    });
     // Hourly purge
     const purgeInterval=setInterval(()=>{
       setOrders(prev=>{
@@ -1754,7 +1834,7 @@ export default function App(){
         return purged;
       });
     },60*60*1000);
-    return()=>{unsubOrders();unsubUsers();unsubSkus();unsubCats();unsubBuyers();clearInterval(purgeInterval);};
+    return()=>{unsubOrders();unsubUsers();unsubSkus();unsubCats();unsubBuyers();unsubBuyerGroups();clearInterval(purgeInterval);};
   },[]);
 
   const staffUser=users.find(u=>u.id===staffId);
@@ -1798,6 +1878,11 @@ export default function App(){
     if(action==="edit")set(ref(db,`buyers/${payload.id}`),payload);
     if(action==="delete")remove(ref(db,`buyers/${payload}`));
   };
+  const onBuyerGroupChange=(action,payload)=>{
+    if(action==="add")set(ref(db,`buyerGroups/${payload.id}`),payload);
+    if(action==="edit")set(ref(db,`buyerGroups/${payload.id}`),payload);
+    if(action==="delete")remove(ref(db,`buyerGroups/${payload}`));
+  };
 
   if(loading)return <div style={{minHeight:620,background:"#fff",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
     <div style={{fontFamily:C.mono,fontWeight:700,fontSize:20,color:C.amber}}>ORDER<span style={{color:C.gray}}>FLOW</span></div>
@@ -1811,6 +1896,6 @@ export default function App(){
     if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} onReopen={()=>reopenOrder(activeOrder.id)} skuList={enrichedSkuList} catList={catList}/>;
     return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)}/>;
   }
-  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange}/>;
+  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange} buyerGroups={buyerGroups} onBuyerGroupChange={onBuyerGroupChange}/>;
   return null;
 }
