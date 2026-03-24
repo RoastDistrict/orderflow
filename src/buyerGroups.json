@@ -1,0 +1,9 @@
+[
+  { "id": "SD",  "name": "Sundry Debtors",     "abbr": "SD"  },
+  { "id": "SC",  "name": "Sundry Creditors",   "abbr": "SC"  },
+  { "id": "DIN", "name": "Dinesh Channel",     "abbr": "DIN" },
+  { "id": "VER", "name": "Vernit Channel",     "abbr": "VER" },
+  { "id": "ARC", "name": "Architect Channel",  "abbr": "ARC" },
+  { "id": "OUT", "name": "Outstation Debtors", "abbr": "OUT" },
+  { "id": "LOC", "name": "Local Debtors",      "abbr": "LOC" }
+]
