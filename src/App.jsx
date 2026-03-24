@@ -302,11 +302,20 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut}){
 }
 
 // ─── GOOGLE VISION (via Vercel serverless proxy) ─────────────
-async function extractOrderFromImage(base64Image,skuList){
-  const res=await fetch("/api/vision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:base64Image})});
-  const data=await res.json();
-  const rawText=data.responses?.[0]?.fullTextAnnotation?.text||"";
-  return parseOrderText(rawText,skuList);
+async function extractOrderFromImage(base64Image,skuList,mode="free",buyerList=[],catList=[]){
+  if(mode==="premium"){
+    // Claude Vision API: vision + reasoning
+    const res=await fetch("/api/claude-vision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:base64Image,buyers:buyerList,skus:skuList,catList:catList})});
+    const data=await res.json();
+    if(!res.ok)throw new Error(data.error||"Claude extraction failed");
+    return parseClaudeExtraction(data,skuList,buyerList);
+  } else {
+    // Google Vision API: OCR only (original flow)
+    const res=await fetch("/api/vision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:base64Image})});
+    const data=await res.json();
+    const rawText=data.responses?.[0]?.fullTextAnnotation?.text||"";
+    return parseOrderText(rawText,skuList);
+  }
 }
 function parseOrderText(text,skuList){
   // ── Step 1: clean each line ──────────────────────────────────
@@ -389,6 +398,57 @@ function parseOrderText(text,skuList){
   const filtered=sections.filter(s=>s.items.length>0);
   if(filtered.length===0)return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
   return{sections:filtered,notes:notesRaw.join(" · "),parseError:false};
+}
+
+// ─── CLAUDE EXTRACTION PARSER ─────────────────────────────────────
+// Parse Claude Vision response: matches buyers + SKUs with confidence flagging
+function parseClaudeExtraction(claudeData,skuList,buyerList){
+  const sections=[];
+  const notesRaw=[];
+  
+  if(!claudeData.orders||!Array.isArray(claudeData.orders)){
+    return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
+  }
+  
+  for(const order of claudeData.orders){
+    const buyerMatch=buyerList.find(b=>b.name.toUpperCase()===order.buyer?.toUpperCase());
+    const sectionName=buyerMatch?.name||order.buyer||"Unknown Buyer";
+    const section={name:sectionName,items:[],_raw:order._raw,_confidence:order.confidence};
+    
+    if(order.items&&Array.isArray(order.items)){
+      for(const item of order.items){
+        if(item.sku){
+          // SKU matched by Claude
+          const skuMatch=skuList.find(s=>s.id.toUpperCase()===item.sku.toUpperCase());
+          section.items.push({
+            sku:item.sku.toUpperCase(),
+            qty:item.qty||1,
+            confidence:item.confidence>=95?item.confidence:Math.min(item.confidence,94),
+            skipped:false,
+            confirmed:item.confidence>=95,
+            custom:false,
+            _raw:item._raw||null
+          });
+        } else if(item._raw){
+          // No match found, include raw text
+          section.items.push({
+            sku:item._raw,
+            qty:item.qty||1,
+            confidence:0,
+            skipped:false,
+            confirmed:false,
+            custom:true,
+            _raw:item._raw
+          });
+        }
+      }
+    }
+    
+    if(section.items.length>0)sections.push(section);
+  }
+  
+  if(sections.length===0)return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
+  return{sections,notes:"",parseError:false};
 }
 
 // ─── SKU TYPEAHEAD ────────────────────────────────────────────
@@ -539,12 +599,12 @@ function BuyerTypeahead({value,onChange,onSelect,placeholder,autoFocus,style={}}
 
 // ─── REVIEW ITEM ROW ──────────────────────────────────────────
 function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[]}){
-  const [editSku,setEditSku]=useState(!item.confirmed);
+  const [editSku,setEditSku]=useState(item.confidence<95&&!item.confirmed); // Auto-open edit if <95% confidence
   const [skuVal,setSkuVal]=useState(item.sku);
   const [editQty,setEditQty]=useState(false);
   const [qtyVal,setQtyVal]=useState(String(item.qty));
-  const isLow=!item.confirmed&&!(!item.sku||!item.sku.trim()); // unconfirmed non-blank items need review
-  const saveSku=()=>{onChange(sIdx,iIdx,"sku",skuVal.trim().toUpperCase());onChange(sIdx,iIdx,"confirmed",true);setEditSku(false);};
+  const isLow=!item.skipped&&item.confidence<95; // Flag if confidence < 95%
+  const saveSku=()=>{onChange(sIdx,iIdx,"sku",skuVal.trim().toUpperCase());onChange(sIdx,iIdx,"confirmed",true);onChange(sIdx,iIdx,"_userCorrected",item.confidence<95);setEditSku(false);};
   const saveQty=()=>{const n=parseInt(qtyVal);if(!isNaN(n)&&n>0)onChange(sIdx,iIdx,"qty",n);setEditQty(false);};
   return <div style={{background:item.skipped?"#fff":isLow?C.amberBg:item.confirmed?C.greenBg:"#fff",border:`1px solid ${item.skipped?C.border:isLow?C.amberBd:item.confirmed?C.greenBd:C.border}`,borderRadius:10,padding:"12px 13px",marginBottom:8,opacity:item.skipped?0.4:1}}>
     <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
@@ -552,7 +612,7 @@ function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[]}){
         <SkuTypeahead
           value={skuVal}
           onChange={v=>setSkuVal(v)}
-          onSelect={(id,isCustom)=>{setSkuVal(id);onChange(sIdx,iIdx,"sku",id);onChange(sIdx,iIdx,"confirmed",true);onChange(sIdx,iIdx,"custom",isCustom);setEditSku(false);}}
+          onSelect={(id,isCustom)=>{setSkuVal(id);onChange(sIdx,iIdx,"sku",id);onChange(sIdx,iIdx,"confirmed",true);onChange(sIdx,iIdx,"custom",isCustom);onChange(sIdx,iIdx,"_userCorrected",item.confidence<95);setEditSku(false);}}
           skuList={skuList}
           placeholder="e.g. HG 3615"
           autoFocus
@@ -563,9 +623,9 @@ function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[]}){
       </div>:<>
         <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:item.custom?C.indigo:C.text,textDecoration:item.skipped?"line-through":"none",flex:1}}>{item.sku}{item.custom&&<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px",marginLeft:6,color:C.indigo}}>CUSTOM</span>}</span>
         {!item.skipped&&<>
-          <span style={{fontFamily:C.mono,fontSize:10,color:item.confidence>=85?C.green:item.confidence>=70?C.textDim:C.amber}}>{item.confidence}%</span>
+          <span style={{fontFamily:C.mono,fontSize:10,color:item.confidence>=95?C.green:item.confidence>=70?C.textDim:C.amber}}>{item.confidence}%</span>
           {item.confirmed&&!item.custom&&<span style={{fontFamily:C.mono,fontSize:10,color:C.green}}>✓</span>}
-          <button onClick={()=>{setSkuVal(item.sku);setEditSku(true);}} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:11}}>Edit</button>
+          {!item.confirmed||item.confidence<95&&<button onClick={()=>{setSkuVal(item.sku);setEditSku(true);}} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:11}}>Edit</button>}
         </>}
       </>}
     </div>
@@ -583,7 +643,7 @@ function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[]}){
       <button onClick={onSkip} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:11}}>Remove</button>
     </div>}
     {isLow&&!item.skipped&&<div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.amberBd}`}}>
-      <div style={{fontSize:11,color:C.amber,marginBottom:8}}>⚠ {item.confidence>0?`AI matched at ${item.confidence}% — verify and confirm.`:"No match found — please enter the correct SKU."}</div>
+      <div style={{fontSize:11,color:C.amber,marginBottom:8}}>⚠ Confidence {item.confidence}% — please verify and confirm or edit this entry.</div>
     </div>}
   </div>;
 }
@@ -696,13 +756,14 @@ function CropScreen({imgSrc,onCrop,onRetake}){
 }
 
 // ─── SCAN SCREEN ──────────────────────────────────────────────
-function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
-  const [stage,setStage]=useState("choose"); // choose|crop|analysing|reviewing|manual
+function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[]}){
+  const [stage,setStage]=useState("choose"); // choose|crop|vision-mode|analysing|reviewing|manual
   const [rawImgSrc,setRawImgSrc]=useState(null);
   const [imgSrc,setImgSrc]=useState(null);
   const [imgB64,setImgB64]=useState(null);
   const [ext,setExt]=useState(null);
   const [error,setError]=useState(null);
+  const [visionMode,setVisionMode]=useState(null); // "free" | "premium"
   // Manual entry state
   const [manualLines,setManualLines]=useState([{cat:"",sku:"",qty:1}]);
   const [manualSection,setManualSection]=useState("");
@@ -715,14 +776,15 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
     reader.onload=ev=>{setRawImgSrc(ev.target.result);setStage("crop");};
     reader.readAsDataURL(file);e.target.value="";
   };
-  const handleCrop=(b64,previewSrc)=>{setImgB64(b64);setImgSrc(previewSrc);analyse(b64);};
-  const analyse=async(b64)=>{
+  const handleCrop=(b64,previewSrc)=>{setImgB64(b64);setImgSrc(previewSrc);setStage("vision-mode");};
+  const selectVisionMode=mode=>{setVisionMode(mode);analyse(imgB64,mode);};
+  const analyse=async(b64,mode="free")=>{
     setStage("analysing");setError(null);
     try{
-      const result=await extractOrderFromImage(b64,skuList);
+      const result=await extractOrderFromImage(b64,skuList,mode,buyerList,catList);
       if(result.parseError||result.sections.every(s=>s.items.length===0)){
         setError("Couldn't extract SKUs. Adjust the crop more tightly and try again.");
-        setStage("analyseError"); // Don't go back to crop — preserve the crop state
+        setStage("analyseError");
         return;
       }
       setExt(result);setStage("reviewing");
@@ -763,7 +825,21 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList}){
           <div><div style={{fontWeight:700,fontSize:15,color:C.text,marginBottom:2}}>Enter Manually</div><div style={{fontSize:12,color:C.textDim}}>Type SKU codes and quantities directly</div></div>
         </button>
       </>}
-      {stage==="manual"&&<>
+      {stage==="vision-mode"&&imgSrc&&<>
+        <img src={imgSrc} alt="slip" style={{width:"100%",borderRadius:12,border:`1px solid ${C.border}`,display:"block",marginBottom:12}}/>
+        <div style={{fontSize:13,color:C.textDim,textAlign:"center",marginBottom:16,fontWeight:600}}>Choose extraction method:</div>
+        <button onClick={()=>selectVisionMode("free")} style={{width:"100%",padding:16,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:12,textAlign:"left",marginBottom:10,boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+          <span style={{fontSize:24,flexShrink:0}}>🆓</span>
+          <div><div style={{fontWeight:700,fontSize:14,color:C.text,marginBottom:2}}>Free</div><div style={{fontSize:11,color:C.textDim}}>Google Vision (fast OCR)</div></div>
+          <div style={{flex:1}}/>
+        </button>
+        <button onClick={()=>selectVisionMode("premium")} style={{width:"100%",padding:16,borderRadius:12,border:`1px solid ${C.amberBd}`,background:C.amberBg,cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:12,textAlign:"left",marginBottom:12}}>
+          <span style={{fontSize:24,flexShrink:0}}>⭐</span>
+          <div><div style={{fontWeight:700,fontSize:14,color:C.amber,marginBottom:2}}>Premium</div><div style={{fontSize:11,color:"#92610A"}}>Claude Vision (AI understanding)</div></div>
+          <div style={{flex:1}}/>
+        </button>
+        <Btn onClick={()=>{setStage("choose");setRawImgSrc(null);setImgSrc(null);setError(null);}} color="ghost" sx={{width:"100%",padding:11}}>↩ Back</Btn>
+      </>}
         <div style={{marginBottom:14}}>
           <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:5}}>CUSTOMER / SECTION NAME</div>
           <BuyerTypeahead value={manualSection} onChange={v=>setManualSection(v)} onSelect={b=>setManualSection(b.name)} placeholder="e.g. Mahavir Traders"/>
@@ -1884,7 +1960,7 @@ export default function App(){
 
   if(screen==="choose")return <ChooseScreen onStaff={()=>setScreen("staff-select")} onAdmin={()=>setScreen("admin-app")}/>;
   if(screen==="staff-select")return <StaffSelect users={users} onSelect={id=>{setStaffId(id);setScreen("staff-app");}} onBack={()=>setScreen("choose")}/>;
-  if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setActiveOrderId(o.id);setScreen("staff-app");}} skuList={enrichedSkuList} catList={catList}/>;
+  if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setActiveOrderId(o.id);setScreen("staff-app");}} skuList={enrichedSkuList} catList={catList} buyerList={buyerList}/>;
   if(screen==="staff-app"){
     if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} onReopen={()=>reopenOrder(activeOrder.id)} skuList={enrichedSkuList} catList={catList}/>;
     return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)}/>;
