@@ -1,7 +1,4 @@
 // api/claude-vision.js
-// Vercel serverless function: extracts orders from handwritten slips using Claude Vision
-// POST /api/claude-vision with { image, buyers, skus, catList }
-
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -18,12 +15,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Build reference data for Claude's context
     const buyerRef = buyers.map(b => `${b.id}: ${b.name} (${b.group})`).slice(0, 50).join("\n");
     const skuRef = skus.map(s => `${s.id} (${catList.find(c => c.id === s.cat)?.name || "unknown"})`).slice(0, 100).join("\n");
 
-    const prompt = `You are an order extraction assistant for a laminate shop. 
-Extract all orders from this handwritten slip image.
+    const prompt = `You are an order extraction assistant for a laminate shop. Extract all orders from this handwritten slip image.
 
 BUYERS (sample):
 ${buyerRef}
@@ -31,18 +26,13 @@ ${buyerRef}
 SKUS (sample):
 ${skuRef}
 
-TASK:
-1. Identify each buyer/customer (section name)
-2. Extract SKU codes and quantities for each buyer
-3. Return JSON with confidence scores for each match
-
-Return ONLY valid JSON (no markdown, no preamble):
+TASK: Extract buyer/customer names and SKU codes with quantities. Return ONLY JSON (no markdown):
 {
   "orders": [
     {
-      "buyer": "exact_buyer_name_or_new_name",
+      "buyer": "exact_buyer_name",
       "confidence": 95,
-      "_raw": "raw_ocr_text_from_slip",
+      "_raw": "raw_ocr_text",
       "items": [
         { "sku": "HG 3615", "qty": 5, "confidence": 95 },
         { "sku": null, "_raw": "MF X99", "qty": 3, "confidence": 20 }
@@ -51,13 +41,7 @@ Return ONLY valid JSON (no markdown, no preamble):
   ]
 }
 
-CONFIDENCE RULES:
-- 95-100: Exact match found in master list
-- 70-94: Close match (minor OCR error)
-- 1-69: Partial match, needs user confirmation
-- 0: No match, user must type correct value
-
-For each unmatched buyer/SKU, include _raw field with what you actually read from the image.`;
+CONFIDENCE: 95-100=exact match, 70-94=close match, 1-69=partial, 0=no match`;
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -92,13 +76,11 @@ For each unmatched buyer/SKU, include _raw field with what you actually read fro
     });
 
     const data = await response.json();
-
     if (!response.ok) {
       console.error("Claude API error:", data);
       return res.status(500).json({ error: `Claude API error: ${data.error?.message || "Unknown"}` });
     }
 
-    // Extract JSON from response
     const content = data.content[0]?.text || "";
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
