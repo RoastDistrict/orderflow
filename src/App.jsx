@@ -403,11 +403,15 @@ function parseClaudeExtraction(claudeData,skuList,buyerList){
   for(const order of claudeData.orders){
     const buyerMatch=buyerList.find(b=>b.name.toUpperCase()===order.buyer?.toUpperCase());
     const sectionName=buyerMatch?.name||order.buyer||"Unknown Buyer";
-    const section={name:sectionName,items:[],_raw:order._raw,_confidence:order.confidence};
+    const section={name:sectionName,items:[],_raw:order._raw,_confidence:order.confidence||0};
     if(order.items&&Array.isArray(order.items)){
       for(const item of order.items){
-        if(item.sku)section.items.push({sku:item.sku.toUpperCase(),qty:item.qty||1,confidence:item.confidence>=95?item.confidence:Math.min(item.confidence,94),skipped:false,confirmed:item.confidence>=95,custom:false,_raw:item._raw||null});
-        else if(item._raw)section.items.push({sku:item._raw,qty:item.qty||1,confidence:0,skipped:false,confirmed:false,custom:true,_raw:item._raw});
+        if(item.sku){
+          const conf=Math.max(0,Math.min(100,item.confidence||0));
+          section.items.push({sku:item.sku.toUpperCase(),qty:parseInt(item.qty)||1,confidence:conf,skipped:false,confirmed:conf>=95,custom:false,_raw:item._raw||null});
+        } else if(item._raw){
+          section.items.push({sku:item._raw,qty:parseInt(item.qty)||1,confidence:0,skipped:false,confirmed:false,custom:true,_raw:item._raw});
+        }
       }
     }
     if(section.items.length>0)sections.push(section);
@@ -415,7 +419,6 @@ function parseClaudeExtraction(claudeData,skuList,buyerList){
   if(sections.length===0)return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
   return{sections,notes:"",parseError:false};
 }
-
 // ─── SKU TYPEAHEAD ────────────────────────────────────────────
 // Shared typeahead input used in manual entry + order SKU editing
 function SkuTypeahead({value,onChange,onSelect,onBlur,skuList,placeholder,autoFocus,style={}}){
