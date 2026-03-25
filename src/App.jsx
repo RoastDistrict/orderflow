@@ -304,19 +304,18 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut}){
 // ─── GOOGLE VISION (via Vercel serverless proxy) ─────────────
 async function extractOrderFromImage(base64Image,skuList,mode="free",buyerList=[],catList=[]){
   if(mode==="premium"){
-    // Claude Vision API: vision + reasoning
     const res=await fetch("/api/claude-vision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:base64Image,buyers:buyerList,skus:skuList,catList:catList})});
     const data=await res.json();
     if(!res.ok)throw new Error(data.error||"Claude extraction failed");
     return parseClaudeExtraction(data,skuList,buyerList);
-  } else {
-    // Google Vision API: OCR only (original flow)
+  }else{
     const res=await fetch("/api/vision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:base64Image})});
     const data=await res.json();
     const rawText=data.responses?.[0]?.fullTextAnnotation?.text||"";
     return parseOrderText(rawText,skuList);
   }
 }
+
 function parseOrderText(text,skuList){
   // ── Step 1: clean each line ──────────────────────────────────
   // Remove tick marks, checkmarks, crosses, slashes from anywhere in line
@@ -404,49 +403,19 @@ function parseOrderText(text,skuList){
 // Parse Claude Vision response: matches buyers + SKUs with confidence flagging
 function parseClaudeExtraction(claudeData,skuList,buyerList){
   const sections=[];
-  const notesRaw=[];
-  
-  if(!claudeData.orders||!Array.isArray(claudeData.orders)){
-    return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
-  }
-  
+  if(!claudeData.orders||!Array.isArray(claudeData.orders))return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
   for(const order of claudeData.orders){
     const buyerMatch=buyerList.find(b=>b.name.toUpperCase()===order.buyer?.toUpperCase());
     const sectionName=buyerMatch?.name||order.buyer||"Unknown Buyer";
     const section={name:sectionName,items:[],_raw:order._raw,_confidence:order.confidence};
-    
     if(order.items&&Array.isArray(order.items)){
       for(const item of order.items){
-        if(item.sku){
-          // SKU matched by Claude
-          const skuMatch=skuList.find(s=>s.id.toUpperCase()===item.sku.toUpperCase());
-          section.items.push({
-            sku:item.sku.toUpperCase(),
-            qty:item.qty||1,
-            confidence:item.confidence>=95?item.confidence:Math.min(item.confidence,94),
-            skipped:false,
-            confirmed:item.confidence>=95,
-            custom:false,
-            _raw:item._raw||null
-          });
-        } else if(item._raw){
-          // No match found, include raw text
-          section.items.push({
-            sku:item._raw,
-            qty:item.qty||1,
-            confidence:0,
-            skipped:false,
-            confirmed:false,
-            custom:true,
-            _raw:item._raw
-          });
-        }
+        if(item.sku)section.items.push({sku:item.sku.toUpperCase(),qty:item.qty||1,confidence:item.confidence>=95?item.confidence:Math.min(item.confidence,94),skipped:false,confirmed:item.confidence>=95,custom:false,_raw:item._raw||null});
+        else if(item._raw)section.items.push({sku:item._raw,qty:item.qty||1,confidence:0,skipped:false,confirmed:false,custom:true,_raw:item._raw});
       }
     }
-    
     if(section.items.length>0)sections.push(section);
   }
-  
   if(sections.length===0)return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
   return{sections,notes:"",parseError:false};
 }
@@ -776,7 +745,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[]}){
     reader.onload=ev=>{setRawImgSrc(ev.target.result);setStage("crop");};
     reader.readAsDataURL(file);e.target.value="";
   };
-  const handleCrop=(b64,previewSrc)=>{setImgB64(b64);setImgSrc(previewSrc);setStage("vision-mode");};
+const handleCrop=(b64,previewSrc)=>{setImgB64(b64);setImgSrc(previewSrc);setStage("vision-mode");};
   const selectVisionMode=mode=>{setVisionMode(mode);analyse(imgB64,mode);};
   const analyse=async(b64,mode="free")=>{
     setStage("analysing");setError(null);
