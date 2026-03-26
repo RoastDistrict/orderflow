@@ -631,7 +631,8 @@ function parseClaudeExtraction(claudeData,skuList,buyerList){
     if(section.items.length>0)sections.push(section);
   }
   if(sections.length===0)return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
-  return{sections,notes:"",parseError:false};
+  const orderNotes=claudeData.orders.map(o=>(o.notes||"").trim()).filter(Boolean).join(" · ");
+  return{sections,notes:orderNotes,parseError:false};
 }
 // ─── SKU TYPEAHEAD ────────────────────────────────────────────
 // Shared typeahead input used in manual entry + order SKU editing
