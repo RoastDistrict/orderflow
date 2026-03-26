@@ -1138,9 +1138,10 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onA
             />
             {(sec._confidence!==undefined&&sec._confidence<95)||(!sec._confidence&&sec._raw)?<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:4,padding:"2px 6px",color:C.amber,whiteSpace:"nowrap"}}>{t.unmatched}</span>:null}
           </div>
-          {sec._raw&&sec._resolvedBuyer&&sec._resolvedBuyer.name!==sec._raw&&<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,marginTop:-4,paddingLeft:18}}>
+          {sec._aliasSaved&&<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,marginTop:-4,paddingLeft:18}}><span style={{fontSize:11,color:C.green,fontWeight:700}}>✓ Alias saved</span></div>}
+          {!sec._aliasSaved&&sec._raw&&sec._resolvedBuyer&&sec._resolvedBuyer.name!==sec._raw&&<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,marginTop:-4,paddingLeft:18}}>
             <span style={{fontSize:11,color:C.textDim}}>"{sec._raw}" → <strong style={{color:C.text}}>{sec._resolvedBuyer.name}</strong></span>
-            <button onMouseDown={e=>{e.preventDefault();onAddAlias(sec._resolvedBuyer,sec._raw);setExt(prev=>{const n=cl(prev);delete n.sections[sIdx]._raw;delete n.sections[sIdx]._resolvedBuyer;return n;});}}
+            <button onMouseDown={e=>{e.preventDefault();if(onAddAlias)onAddAlias(sec._resolvedBuyer,sec._raw);setExt(prev=>{const n=cl(prev);n.sections[sIdx]._aliasSaved=true;delete n.sections[sIdx]._raw;delete n.sections[sIdx]._resolvedBuyer;return n;});}}
               style={{padding:"2px 8px",borderRadius:5,border:`1px solid ${C.greenBd}`,background:C.greenBg,color:C.green,cursor:"pointer",fontSize:10,fontWeight:700,fontFamily:C.mono,whiteSpace:"nowrap"}}>
               {t.saveAlias}
             </button>
@@ -1535,7 +1536,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
 }
 
 // ─── ADMIN APP ────────────────────────────────────────────────
-function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange,buyerGroups,onBuyerGroupChange}){
+function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange,buyerGroups,onBuyerGroupChange,onAddAlias}){
   const [tab,setTab]=useState("orders");
   const [activeOId,setActiveOId]=useState(null);
   const [expandSku,setExpandSku]=useState(null);
@@ -1584,7 +1585,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   const activeOrder=orders.find(o=>o.id===activeOId);
 
   const eSkus=skuListEnriched||skuList;
-  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setScanning(false);}} skuList={eSkus} catList={catList} buyerList={buyerList} lang="en"/>;
+  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setScanning(false);}} skuList={eSkus} catList={catList} buyerList={buyerList} onAddAlias={onAddAlias} lang="en"/>;
   if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} skuList={eSkus} catList={catList}/>;
 
   const tabs=[["orders","📋 Orders"],["analytics","📊 Analytics"],["masterdata","⚙️ Master Data"]];
@@ -2161,6 +2162,6 @@ export default function App(){
     if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} onReopen={()=>reopenOrder(activeOrder.id)} skuList={enrichedSkuList} catList={catList} lang={lang}/>;
     return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)} onEditOrder={id=>{setActiveOrderId(id);}} onReopenOrder={id=>reopenOrder(id)} onItemUpdate={(orderId,sIdx,iIdx,changes)=>updateItem(orderId,sIdx,iIdx,changes)} lang={lang} setLang={setLang}/>;
   }
-  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange} buyerGroups={buyerGroups} onBuyerGroupChange={onBuyerGroupChange}/>;
+  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange} buyerGroups={buyerGroups} onBuyerGroupChange={onBuyerGroupChange} onAddAlias={addAlias}/>;
   return null;
 }
