@@ -504,7 +504,12 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut,onEditOrde
 
 // ─── CLAUDE VISION ────────────────────────────────────────────
 async function extractOrderFromImage(base64Image,skuList,_mode,buyerList=[],catList=[]){
-  const res=await fetch("/api/claude-vision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image:base64Image,buyers:buyerList,skus:skuList,catList:catList})});
+  const res=await fetch("/api/claude-vision",{method:"POST",headers:{"Content-Type":"application/json"},body: JSON.stringify({
+  image: base64Image,
+  buyers: buyerList.map(b=>({name:b.name,aliases:b.aliases||[]})),
+  skus: skuList.map(s=>s.id),
+  catList: catList.map(c=>c.name)
+})});
   const data=await res.json();
   if(!res.ok)throw new Error(data.error||"Claude extraction failed");
   return parseClaudeExtraction(data,skuList,buyerList);
