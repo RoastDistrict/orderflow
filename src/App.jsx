@@ -827,7 +827,7 @@ function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[],lang="en"}){
       <button onClick={onSkip} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:11}}>{t.remove}</button>
     </div>}
     {isLow&&!item.skipped&&<div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${C.amberBd}`}}>
-      <div style={{fontSize:11,color:C.amber,marginBottom:8}}>⚠ {item.confidence>0?`${t.aiMatched} ${item.confidence}${t.verifyConfirm}`:t.noMatchFound}</div>
+      <div style={{fontSize:11,color:C.amber,marginBottom:8}}>⚠ {item.confidence>0?`${t.aiMatched} ${item.confidence}${t.verifyConfirm}`:t.noMatchFound}</div>\n      {!editSku&&<button onClick={()=>{onChange(sIdx,iIdx,"confirmed",true);}} style={{padding:"5px 12px",borderRadius:7,border:"none",background:C.green,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:12}}>✓ Confirm SKU</button>}
     </div>}
   </div>;
 }
@@ -1594,7 +1594,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   const unfulfilled=[];orders.forEach(o=>o.sections.forEach(sec=>sec.items.forEach(item=>{if(item.status==="unavailable"||item.status==="partial")unfulfilled.push({sku:item.sku,customer:sec.name,orderId:o.id,date:o.date,type:item.status,reqQty:item.origQty,sentQty:item.qty});})));
   const skuMap={};unfulfilled.forEach(e=>{if(!skuMap[e.sku])skuMap[e.sku]={sku:e.sku,naCount:0,partialCount:0,totalMissed:0,occurrences:[]};if(e.type==="unavailable")skuMap[e.sku].naCount++;else skuMap[e.sku].partialCount++;skuMap[e.sku].totalMissed+=e.reqQty-e.sentQty;skuMap[e.sku].occurrences.push(e);});
   const skus=Object.values(skuMap).sort((a,b)=>(b.naCount+b.partialCount)-(a.naCount+a.partialCount));
-  const totalNA=unfulfilled.filter(e=>e.type==="unavailable").length,totalPart=unfulfilled.filter(e=>e.type==="partial").length,totalMiss=unfulfilled.reduce((s,e)=>s+e.reqQty-e.sentQty,0);
+  const totalNA=unfulfilled.filter(e=>e.type==="unavailable").length,totalPart=unfulfilled.filter(e=>e.type==="partial").length,totalMiss=unfulfilled.reduce((s,e)=>s+(e.reqQty-(e.sentQty||0)),0);
   const maxVol=Math.max(...DAILY_VOLUME.map(d=>d.count));
 
   // Filtered SKUs for SKU tab
