@@ -1153,7 +1153,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onA
         </div>)}
         {!canConfirm&&<div style={{background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:10,padding:"12px 14px",marginBottom:12,fontSize:12,color:C.amber}}>⚠ {t.reviewWarning} {lowConfPending.length} {t.uncertainItems}{lowConfPending.length>1?"s":""}</div>}
         <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>
-          {(()=>{const cnt=ext.sections.filter(s=>s.items.some(i=>!i.skipped&&i.sku)).length;return<Btn onClick={confirm} color={canConfirm?"green":"ghost"} sx={{width:"100%",padding:13,fontSize:14,opacity:canConfirm?1:0.5,cursor:canConfirm?"pointer":"not-allowed"}}>{canConfirm?`${t.createOrders} ${cnt} ${t.orders}`:`${t.reviewWarning} ${lowConfPending.length} ${t.uncertainItems}`}</Btn>;})}
+          {(()=>{const cnt=ext.sections.filter(s=>s.items.some(i=>!i.skipped&&i.sku)).length;return<Btn onClick={confirm} color={canConfirm?"green":"ghost"} sx={{width:"100%",padding:13,fontSize:14,opacity:canConfirm?1:0.5,cursor:canConfirm?"pointer":"not-allowed"}}>{canConfirm?`${t.createOrders} ${cnt} ${t.orders}`:`${t.reviewWarning} ${lowConfPending.length} ${t.uncertainItems}`}</Btn>;})()}
           <Btn onClick={()=>{setStage("choose");setExt(null);setError(null);}} color="ghost" sx={{width:"100%",padding:11}}>{t.startOver}</Btn>
         </div>
       </>}
