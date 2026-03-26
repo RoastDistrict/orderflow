@@ -575,7 +575,7 @@ function parseOrderText(text,skuList){
         currentSection.items.push({
           sku:matched,qty,confidence,
           skipped:false,
-          confirmed:true,
+          confirmed:confidence>=95,
           custom:confidence===0
         });
       }
@@ -616,7 +616,7 @@ function parseClaudeExtraction(claudeData,skuList,buyerList){
         const finalConf=isCustom?0:matchConf;
         section.items.push({
           sku:finalSku,qty:parseInt(item.qty)||1,
-          confidence:finalConf,skipped:false,confirmed:true,
+          confidence:finalConf,skipped:false,confirmed:finalConf>=95||isCustom,
           custom:isCustom,_raw:rawSku
         });
       }
@@ -1125,6 +1125,11 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onA
               {t.saveAlias}
             </button>
           </div>}
+          {sec.notes?<div style={{background:C.blueBg,border:`1px solid ${C.blueBd}`,borderRadius:8,padding:"8px 12px",marginBottom:8,display:"flex",alignItems:"flex-start",gap:8}}>
+            <div style={{flex:1,fontSize:12,color:C.text}}>{sec.notes}</div>
+            <button onClick={()=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].notes="";return n;})} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:14,lineHeight:1,padding:0,flexShrink:0}}>✕</button>
+          </div>:<button onClick={()=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].notes=" ";return n;})} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:11,fontFamily:C.sans,padding:"0 0 6px 0",display:"block"}}>+ Add note</button>}
+          {sec.notes&&sec.notes.trim()&&<textarea value={sec.notes} onChange={e=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].notes=e.target.value;return n;})} rows={2} style={{width:"100%",padding:"7px 10px",borderRadius:7,border:`1px solid ${C.blueBd}`,fontSize:12,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",resize:"none",marginBottom:8}}/>}
           {sec.items.map((item,iIdx)=><ReviewItemRow key={iIdx} item={item} sIdx={sIdx} iIdx={iIdx} onChange={updateItem} onSkip={()=>skipItem(sIdx,iIdx)} skuList={skuList} lang={lang}/>)}
           <button onClick={()=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].items.push({sku:"",qty:1,confidence:0,skipped:false,confirmed:false,custom:false});return n;})}
             style={{width:"100%",padding:"8px",borderRadius:8,border:`1px dashed ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer",fontSize:12,fontFamily:C.sans,marginTop:6}}>
