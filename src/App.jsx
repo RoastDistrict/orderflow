@@ -582,7 +582,7 @@ function parseOrderText(text,skuList){
         currentSection.items.push({
           sku:matched,qty,confidence,
           skipped:false,
-          confirmed:confidence>=95,
+          confirmed:true,
           custom:confidence===0
         });
       }
@@ -623,7 +623,7 @@ function parseClaudeExtraction(claudeData,skuList,buyerList){
         const finalConf=isCustom?0:matchConf;
         section.items.push({
           sku:finalSku,qty:parseInt(item.qty)||1,
-          confidence:finalConf,skipped:false,confirmed:finalConf>=95,
+          confidence:finalConf,skipped:false,confirmed:true,
           custom:isCustom,_raw:rawSku
         });
       }
