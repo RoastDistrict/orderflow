@@ -1667,7 +1667,7 @@ function AnalyticsTab({orders,users}){
       </div>
       <div style={{display:"flex",alignItems:"flex-end",gap:4,height:90}}>
         {fulfRateData.map(d=><div key={d.date} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
-          <div style={{width:"100%",display:"flex",flexDirection:"column",height:75,justifyContent:"flex-end",gap:1}}>
+          <div style={{width:"100%",display:"flex",flexDirection:"column-reverse",height:75,gap:1}}>
             {d.total>0?<>
               <div style={{width:"100%",background:C.red,borderRadius:d.fulfilled===0&&d.partial===0?"3px 3px 0 0":"0",minHeight:d.na>0?3:0,height:`${d.na}%`}}/>
               <div style={{width:"100%",background:C.amber,borderRadius:d.fulfilled===0?"3px 3px 0 0":"0",minHeight:d.partial>0?3:0,height:`${d.partial}%`}}/>
@@ -1713,7 +1713,7 @@ function AnalyticsTab({orders,users}){
         :<div style={{display:"flex",alignItems:"flex-end",gap:12,height:80,justifyContent:"center"}}>
           {ageData.map(([label,count])=>{const barColor=label==="1 day"?C.amber:label==="2 days"?C.red:"#7F1D1D";return <div key={label} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
             <div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:barColor}}>{count}</div>
-            <div style={{width:"100%",height:Math.max(4,Math.round((count/maxAge)*68)),background:barColor,borderRadius:"4px 4px 0 0",opacity:0.85}}/>
+            <div style={{width:"100%",height:count>0?Math.max(4,Math.round((count/maxAge)*68)):2,background:barColor,borderRadius:"4px 4px 0 0",opacity:count>0?0.85:0.2}}/>
             <div style={{fontSize:10,color:C.textDim,textAlign:"center",lineHeight:1.3}}>{label}</div>
           </div>;})}
         </div>}
