@@ -2289,8 +2289,11 @@ export default function App(){
   // sendTobilling: splits order — fulfilled/partial/NA items billed, remaining qty of partials + pending items become new pending-order
   const sendTobilling=orderId=>{
     const order=orders.find(o=>o.id===orderId);if(!order)return;
-    // Billed side: all handled items (fulfilled, partial, unavailable) — keep as-is
-    const billedSections=order.sections.map(sec=>({...sec,items:sec.items.filter(i=>i.status!=="pending")})).filter(s=>s.items.length>0);
+    // Billed side: only fulfilled + partial (at sent qty). N/A and pending excluded.
+    const billedSections=order.sections.map(sec=>({...sec,items:sec.items
+      .filter(i=>i.status==="fulfilled"||i.status==="partial")
+      .map(i=>i.status==="partial"?{...i,origQty:i.qty}:i)
+    })).filter(s=>s.items.length>0);
     // Pending side: unhandled items PLUS remainder of partial items
     const newPendingItems=secs=>{
       const items=[];
