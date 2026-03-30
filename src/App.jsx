@@ -216,6 +216,11 @@ const progData = (o) => {
   return { done, total: it.length, pct: Math.round((done / it.length) * 100) };
 };
 
+const fifo = (arr) => [...arr].sort((a,b)=>{
+  if(a.createdAt&&b.createdAt) return a.createdAt-b.createdAt;
+  return (a.scannedAt||"").localeCompare(b.scannedAt||"");
+});
+
 // Look up rate for a SKU code from skus list
 const getRateForSku = (skuCode, skuList) => {
   const found = skuList.find((s) => s.id.toUpperCase() === skuCode.toUpperCase());
@@ -339,7 +344,9 @@ function OrderCard({order,onOpen,onDelete,onEdit,onReopen,dim=false,lang="en",bu
   const names=order.sections.map(s=>{const b=buyerList.find(x=>x.name===s.name);return(lang==="hi"&&b?.hindiName)?b.hindiName:s.name;}).join(", ");
   const initials=(()=>{const words=displayName.trim().split(/\s+/).filter(Boolean);if(words.length===0)return"?";if(words.length===1)return words[0].slice(0,2).toUpperCase();return(words[0][0]+words[1][0]).toUpperCase();})();
   const hasPartialOrNA=allItems(order).some(i=>i.status==="partial"||i.status==="unavailable");
-  const idBg=billed?C.grayBg:processed?(hasPartialOrNA?C.amberBg:C.grayBg):ready?C.greenBg:C.amberBg,idC=billed?C.gray:processed?(hasPartialOrNA?C.amber:C.gray):ready?C.green:C.amber,idBd=billed?C.border:processed?(hasPartialOrNA?C.amberBd:C.border):ready?C.greenBd:C.amberBd;
+const idBg=billed?C.grayBg:processed?(hasPartialOrNA?C.amberBg:C.grayBg):ready?C.greenBg:C.amberBg;
+const idC=billed?C.gray:processed?(hasPartialOrNA?C.amber:C.gray):ready?C.green:C.amber;
+const idBd=billed?C.border:processed?(hasPartialOrNA?C.amberBd:C.border):ready?C.greenBd:C.amberBd;
   const [menuOpen,setMenuOpen]=useState(false);
   const pressTimer=useRef(null);
 
@@ -485,11 +492,11 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut,onEditOrde
   const t=T[lang];
   const [tab,setTab]=useState("live");
   const [search,setSearch]=useState("");
-  const live=orders.filter(o=>o.status==="live");
-  const processed=orders.filter(o=>o.status==="processed");
-  const pendingOrders=orders.filter(o=>o.status==="pending-order");
-  const billed=orders.filter(o=>o.status==="billed"&&o.date===TODAY);
-  const hist=orders.filter(o=>o.status==="historical");
+  const live=fifo(orders.filter(o=>o.status==="live"));
+  const processed=fifo(orders.filter(o=>o.status==="processed"));
+  const pendingOrders=fifo(orders.filter(o=>o.status==="pending-order"));
+  const billed=fifo(orders.filter(o=>o.status==="billed"&&o.date===TODAY));
+  const hist=fifo(orders.filter(o=>o.status==="historical"));
   const inProg=live.filter(o=>!isReady(o)),ready=live.filter(o=>isReady(o));
   const billedGrouped=billed.reduce((acc,o)=>{(acc[o.date]=acc[o.date]||[]).push(o);return acc;},{});
   const billedDates=Object.keys(billedGrouped).sort((a,b)=>b.localeCompare(a));
@@ -1725,10 +1732,10 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
 
       {/* ── ORDERS TAB ── */}
       {tab==="orders"&&(()=>{
-        const liveOrders=orders.filter(o=>o.status==="live");
-        const processedOrders=orders.filter(o=>o.status==="processed");
-        const pendingOrdersList=orders.filter(o=>o.status==="pending-order");
-        const billedOrders=orders.filter(o=>o.status==="billed"&&o.date===TODAY);
+        const liveOrders=fifo(orders.filter(o=>o.status==="live"));
+        const processedOrders=fifo(orders.filter(o=>o.status==="processed"));
+        const pendingOrdersList=fifo(orders.filter(o=>o.status==="pending-order"));
+        const billedOrders=fifo(orders.filter(o=>o.status==="billed"&&o.date===TODAY));
         const baseFiltered=orderFilter==="processed"?processedOrders:orderFilter==="pending-order"?pendingOrdersList:orderFilter==="billed"?billedOrders:liveOrders;
         const filteredOrders=orderSearch.trim()?baseFiltered.filter(o=>{const q=orderSearch.toLowerCase();return o.sections.some(s=>s.name.toLowerCase().includes(q)||s.items.some(i=>i.sku.toLowerCase().includes(q)));;}):baseFiltered;
         const tileSt=(active,color)=>({background:"#fff",border:`2px solid ${active?color:C.border}`,borderRadius:10,padding:"8px 6px",textAlign:"center",cursor:"pointer",transition:"border-color .15s"});
@@ -2290,10 +2297,10 @@ export default function App(){
   const sendTobilling=orderId=>{
     const order=orders.find(o=>o.id===orderId);if(!order)return;
     // Billed side: only fulfilled + partial (at sent qty). N/A and pending excluded.
-    const billedSections=order.sections.map(sec=>({...sec,items:sec.items
-      .filter(i=>i.status==="fulfilled"||i.status==="partial")
-      .map(i=>i.status==="partial"?{...i,origQty:i.qty}:i)
-    })).filter(s=>s.items.length>0);
+  const billedSections=order.sections.map(sec=>({...sec,items:sec.items
+    .filter(i=>i.status==="fulfilled"||i.status==="partial")
+    .map(i=>i.status==="partial"?{...i,origQty:i.qty}:i)
+  })).filter(s=>s.items.length>0);
     // Pending side: unhandled items PLUS remainder of partial items
     const newPendingItems=secs=>{
       const items=[];
@@ -2315,7 +2322,6 @@ export default function App(){
       const billedOrder={...order,sections:billedSections,status:"billed",billedBy:actorName,billedAt:nowTime()};
       set(ref(db,`orders/${orderId}`),billedOrder);
     } else {
-      // Nothing billed — delete the processed order (pending-order will carry everything)
       remove(ref(db,`orders/${orderId}`));
     }
     // Create new pending-order for remainder
