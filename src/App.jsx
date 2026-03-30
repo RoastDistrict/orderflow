@@ -2188,6 +2188,9 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
       {/* ── ANALYTICS TAB ── */}
       {tab==="analytics"&&<AnalyticsTab orders={orders} users={users}/>}
 
+    </div>
+  </div>;
+
 // ─── ROOT APP ─────────────────────────────────────────────────
 export default function App(){
   const [screen,setScreen]=useState("choose");
