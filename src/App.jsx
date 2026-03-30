@@ -338,7 +338,8 @@ function OrderCard({order,onOpen,onDelete,onEdit,onReopen,dim=false,lang="en",bu
   const displayName=(lang==="hi"&&buyerObj?.hindiName)?buyerObj.hindiName:firstName;
   const names=order.sections.map(s=>{const b=buyerList.find(x=>x.name===s.name);return(lang==="hi"&&b?.hindiName)?b.hindiName:s.name;}).join(", ");
   const initials=(()=>{const words=displayName.trim().split(/\s+/).filter(Boolean);if(words.length===0)return"?";if(words.length===1)return words[0].slice(0,2).toUpperCase();return(words[0][0]+words[1][0]).toUpperCase();})();
-  const idBg=billed||processed?C.grayBg:ready?C.greenBg:C.amberBg,idC=billed||processed?C.gray:ready?C.green:C.amber,idBd=billed||processed?C.border:ready?C.greenBd:C.amberBd;
+  const hasPartialOrNA=allItems(order).some(i=>i.status==="partial"||i.status==="unavailable");
+  const idBg=billed?C.grayBg:processed?(hasPartialOrNA?C.amberBg:C.grayBg):ready?C.greenBg:C.amberBg,idC=billed?C.gray:processed?(hasPartialOrNA?C.amber:C.gray):ready?C.green:C.amber,idBd=billed?C.border:processed?(hasPartialOrNA?C.amberBd:C.border):ready?C.greenBd:C.amberBd;
   const [menuOpen,setMenuOpen]=useState(false);
   const pressTimer=useRef(null);
 
@@ -2295,7 +2296,7 @@ export default function App(){
       const items=[];
       secs.forEach(sec=>{
         const pendingItems=sec.items
-          .filter(i=>i.status==="pending")
+          .filter(i=>i.status==="pending"||i.status==="unavailable")
           .map(i=>({...i,status:"pending",handledBy:null,note:""}));
         const partialRemainders=sec.items
           .filter(i=>i.status==="partial"&&i.origQty-i.qty>0)
