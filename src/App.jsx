@@ -45,58 +45,8 @@ const SEED_BUYERS       = buyerData;
 const SEED_BUYER_GROUPS = buyerGroupData;
 
 // ─── SEED DATA ────────────────────────────────────────────────
-const SEED_USERS = [
-  { id: 1, name: "Ravi",   active: true,  itemsHandled: 42, ordersToday: 8,  lastSeen: "09:45" },
-  { id: 2, name: "Priya",  active: true,  itemsHandled: 38, ordersToday: 6,  lastSeen: "10:12" },
-  { id: 3, name: "Suresh", active: true,  itemsHandled: 31, ordersToday: 5,  lastSeen: "08:55" },
-  { id: 4, name: "Anita",  active: false, itemsHandled: 0,  ordersToday: 0,  lastSeen: "Yesterday" },
-  { id: 5, name: "Mohan",  active: true,  itemsHandled: 19, ordersToday: 3,  lastSeen: "11:02" },
-];
-
-const SEED_ORDERS = purgeOldOrders([
-  { id: "A1", date: TODAY, scannedAt: "09:14", status: "live", sections: [
-      { name: "Rama Plywood", items: [
-        { id: 101, sku: "HG 1102", origQty: 12, qty: 12, status: "pending",     note: "", handledBy: null },
-        { id: 102, sku: "SF 3611", origQty: 6,  qty: 6,  status: "pending",     note: "", handledBy: null },
-        { id: 104, sku: "MF 106",  origQty: 2,  qty: 0,  status: "unavailable", note: "", handledBy: "Ravi" },
-      ]},
-  ]},
-  { id: "A2", date: TODAY, scannedAt: "09:14", status: "live", sections: [
-      { name: "Mahavir", items: [
-        { id: 105, sku: "SM 1241", origQty: 9, qty: 5, status: "partial",     note: "Only 5 in stock", handledBy: "Priya" },
-        { id: 106, sku: "SA 3620", origQty: 3, qty: 0, status: "unavailable", note: "",               handledBy: "Ravi"  },
-      ]},
-  ]},
-  { id: "B2", date: TODAY, scannedAt: "10:30", status: "live", sections: [
-      { name: "Rightways", items: [
-        { id: 201, sku: "HG 3615", origQty: 5, qty: 5, status: "fulfilled", note: "", handledBy: "Priya" },
-        { id: 202, sku: "SF 5165", origQty: 8, qty: 8, status: "fulfilled", note: "", handledBy: "Priya" },
-      ]},
-  ]},
-  { id: "B3", date: TODAY, scannedAt: "10:30", status: "live", sections: [
-      { name: "Gurushakti", items: [
-        { id: 203, sku: "SM 3601", origQty: 6, qty: 3, status: "partial", note: "3 available", handledBy: "Suresh" },
-      ]},
-  ]},
-  { id: "C3", date: YDAY, scannedAt: "11:02", status: "billed", sections: [
-      { name: "DMS Design", items: [
-        { id: 301, sku: "HG 5210", origQty: 5, qty: 5, status: "fulfilled",   note: "", handledBy: "Suresh" },
-        { id: 302, sku: "MF F31",  origQty: 4, qty: 4, status: "fulfilled",   note: "", handledBy: "Suresh" },
-        { id: 303, sku: "MF 106",  origQty: 1, qty: 0, status: "unavailable", note: "", handledBy: "Ravi"   },
-      ]},
-  ]},
-  { id: "D4", date: YDAY, scannedAt: "14:45", status: "billed", sections: [
-      { name: "VK Agency", items: [
-        { id: 401, sku: "SA 8235", origQty: 2, qty: 2, status: "fulfilled", note: "",              handledBy: "Mohan" },
-        { id: 402, sku: "HG 8786", origQty: 5, qty: 3, status: "partial",   note: "2 backordered", handledBy: "Mohan" },
-      ]},
-  ]},
-]);
-
-const DAILY_VOLUME = [
-  {date:"Mon",count:4},{date:"Tue",count:7},{date:"Wed",count:5},
-  {date:"Thu",count:9},{date:"Fri",count:6},{date:"Sat",count:11},{date:"Sun",count:3},
-];
+const SEED_USERS = [];
+const SEED_ORDERS = [];
 
 // ─── TRANSLATIONS ─────────────────────────────────────────────
 const T = {
