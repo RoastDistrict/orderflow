@@ -1079,7 +1079,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onA
     })).filter(s=>s.items.length>0);
     validSections.forEach(sec=>{
       const srcSec=ext.sections.find(s=>s.name===sec.name);
-      onConfirm({id:genId(),date:TODAY,scannedAt:nowDateTime(),status:"live",notes:srcSec?.notes||"",sections:[sec]});
+      onConfirm({id:genId(),date:TODAY,scannedAt:nowDateTime(),createdAt:Date.now(),status:"live",notes:srcSec?.notes||"",sections:[sec]});
     });
   };
   const totalItems=ext?ext.sections.reduce((s,sec)=>s+sec.items.filter(i=>!i.skipped).length,0):0;
@@ -1154,7 +1154,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onA
           return <div style={{display:"flex",flexDirection:"column",gap:8}}>
             <Btn onClick={()=>{
               if(!canSubmit)return;
-              const order={id:genId(),date:TODAY,scannedAt:nowDateTime(),status:"live",notes:manualNotes.trim(),sections:[{
+              const order={id:genId(),date:TODAY,scannedAt:nowDateTime(),createdAt:Date.now(),status:"live",notes:manualNotes.trim(),sections:[{
                 name:manualSection.trim()||"Manual Entry",
                 items:validLines.map(l=>({id:Date.now()+Math.random(),sku:l.sku.trim().toUpperCase(),origQty:parseInt(l.qty)||1,qty:parseInt(l.qty)||1,status:"pending",note:"",handledBy:null,confidence:100,custom:l.custom||false}))
               }]};
@@ -2327,7 +2327,7 @@ export default function App(){
     // Create new pending-order for remainder
     if(pendingSections.length>0){
       const newId=genId();
-      const newOrder={id:newId,date:TODAY,scannedAt:nowDateTime(),status:"pending-order",notes:(order.notes?order.notes+" · ":"")+"Pending from "+orderId,sections:pendingSections};
+      const newOrder={id:newId,date:TODAY,scannedAt:nowDateTime(),createdAt:Date.now(),status:"pending-order",notes:(order.notes?order.notes+" · ":"")+"Pending from "+orderId,sections:pendingSections};
       set(ref(db,`orders/${newId}`),newOrder);
     }
   };
