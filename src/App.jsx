@@ -2310,8 +2310,14 @@ export default function App(){
     };
     const pendingSections=order.sections.map(sec=>({...sec,items:newPendingItems([sec])})).filter(s=>s.items.length>0);
     // Update current order to billed
-    const billedOrder={...order,sections:billedSections.length>0?billedSections:order.sections,status:"billed",billedBy:actorName,billedAt:nowTime()};
-    set(ref(db,`orders/${orderId}`),billedOrder);
+    // If nothing to bill, skip billed order entirely
+    if(billedSections.length>0){
+      const billedOrder={...order,sections:billedSections,status:"billed",billedBy:actorName,billedAt:nowTime()};
+      set(ref(db,`orders/${orderId}`),billedOrder);
+    } else {
+      // Nothing billed — delete the processed order (pending-order will carry everything)
+      remove(ref(db,`orders/${orderId}`));
+    }
     // Create new pending-order for remainder
     if(pendingSections.length>0){
       const newId=genId();
