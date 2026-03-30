@@ -1593,6 +1593,134 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
   </div>;
 }
 
+// ─── ANALYTICS TAB ────────────────────────────────────────────
+function AnalyticsTab({orders,users}){
+  const [glanceRange,setGlanceRange]=useState("today");
+  const billedAndHistorical=orders.filter(o=>o.status==="billed"||o.status==="historical");
+  const todayBilled=orders.filter(o=>o.status==="billed"&&o.date===TODAY);
+  const pendingOrdersList=orders.filter(o=>o.status==="pending-order");
+  const todayItems=todayBilled.flatMap(o=>allItems(o));
+  const todayDispatched=todayItems.filter(i=>i.status==="fulfilled"||i.status==="partial").reduce((s,i)=>s+i.qty,0);
+  const todayMissed=todayItems.filter(i=>i.status==="unavailable").reduce((s,i)=>s+i.origQty,0)+todayItems.filter(i=>i.status==="partial").reduce((s,i)=>s+(i.origQty-i.qty),0);
+  const hourBuckets={};
+  todayBilled.forEach(o=>{const hr=o.billedAt?parseInt(o.billedAt.split(":")[0]):null;if(hr!==null){hourBuckets[hr]=(hourBuckets[hr]||0)+1;}});
+  const hours=Array.from({length:13},(_,i)=>i+8);
+  const maxHourCount=Math.max(1,...hours.map(h=>hourBuckets[h]||0));
+  const weekDayNames=["Mon","Tue","Wed","Thu","Fri","Sat"];
+  const weekDayCounts=weekDayNames.map((_,i)=>{const d=new Date();const diff=i+1-d.getDay();const target=localDateISO(new Date(d.getTime()+diff*86400000));return billedAndHistorical.filter(o=>o.date===target).length;});
+  const maxWeekCount=Math.max(1,...weekDayCounts);
+  const last7Days=Array.from({length:7},(_,i)=>localDateISO(new Date(Date.now()-(6-i)*86400000)));
+  const fulfRateData=last7Days.map(date=>{
+    const items=billedAndHistorical.filter(o=>o.date===date).flatMap(o=>allItems(o));
+    const total=items.length;
+    if(total===0)return{date,fulfilled:0,partial:0,na:0,total:0};
+    return{date,fulfilled:Math.round(items.filter(i=>i.status==="fulfilled").length/total*100),partial:Math.round(items.filter(i=>i.status==="partial").length/total*100),na:Math.round(items.filter(i=>i.status==="unavailable").length/total*100),total};
+  });
+  const skuMissMap={};
+  billedAndHistorical.filter(o=>last7Days.includes(o.date)).forEach(o=>{allItems(o).forEach(item=>{if(item.status==="unavailable"||item.status==="partial"){const missed=item.status==="unavailable"?item.origQty:(item.origQty-item.qty);if(missed>0)skuMissMap[item.sku]=(skuMissMap[item.sku]||0)+missed;}});});
+  const topSkus=Object.entries(skuMissMap).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const maxSkuMiss=Math.max(1,...topSkus.map(([,v])=>v));
+  const staffMap={};
+  orders.filter(o=>o.date===TODAY).forEach(o=>{allItems(o).filter(i=>i.handledBy&&i.status!=="pending").forEach(item=>{if(!staffMap[item.handledBy])staffMap[item.handledBy]={name:item.handledBy,handled:0};staffMap[item.handledBy].handled++;});});
+  const staffData=Object.values(staffMap).sort((a,b)=>b.handled-a.handled);
+  const maxStaff=Math.max(1,...staffData.map(s=>s.handled));
+  const ageMap={"1 day":0,"2 days":0,"3+ days":0};
+  pendingOrdersList.forEach(o=>{const ageDays=Math.round((Date.now()-new Date(o.date).getTime())/86400000);if(ageDays<=1)ageMap["1 day"]++;else if(ageDays===2)ageMap["2 days"]++;else ageMap["3+ days"]++;});
+  const ageData=Object.entries(ageMap);
+  const maxAge=Math.max(1,...ageData.map(([,v])=>v));
+  const SHead=({label})=><div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:12,marginTop:4}}>{label}</div>;
+  return <>
+    <SHead label="TODAY AT A GLANCE"/>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:14}}>
+      {[[todayBilled.length,"Orders Billed",C.green],[todayDispatched,"Units Dispatched",C.amber],[todayMissed,"Units Missed",C.red],[pendingOrdersList.length,"Pending Carryover",C.indigo]].map(([v,l,c])=>
+        <div key={l} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{fontFamily:C.mono,fontWeight:700,fontSize:24,color:c}}>{v}</div>
+          <div style={{fontSize:10,color:C.textDim,marginTop:3,fontWeight:500}}>{l}</div>
+        </div>)}
+    </div>
+    <div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:14}}>
+      {[["today","Today (by hour)"],["week","This Week (by day)"]].map(([k,l])=>
+        <button key={k} onClick={()=>setGlanceRange(k)} style={{flex:1,padding:"6px 4px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:glanceRange===k?700:400,background:glanceRange===k?"#fff":"transparent",color:glanceRange===k?C.text:C.textDim,boxShadow:glanceRange===k?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>{l}</button>)}
+    </div>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      <div style={{fontSize:11,color:C.textDim,marginBottom:12,fontWeight:600}}>{glanceRange==="today"?"ORDERS BILLED BY HOUR":"ORDERS BILLED — THIS WEEK"}</div>
+      {glanceRange==="today"
+        ?<div style={{display:"flex",alignItems:"flex-end",gap:3,height:80}}>
+          {hours.map(h=>{const count=hourBuckets[h]||0;const bh=Math.max(4,Math.round((count/maxHourCount)*72));const isNow=new Date().getHours()===h;return <div key={h} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+            {count>0&&<div style={{fontSize:9,color:C.textDim,fontFamily:C.mono}}>{count}</div>}
+            <div style={{width:"100%",height:bh,background:isNow?C.amber:count>0?"#FCD34D":C.border,borderRadius:"3px 3px 0 0",opacity:count>0?1:0.4}}/>
+            <div style={{fontSize:8,color:isNow?C.amber:C.textDim,fontFamily:C.mono,fontWeight:isNow?700:400}}>{h}</div>
+          </div>;})}
+        </div>
+        :<div style={{display:"flex",alignItems:"flex-end",gap:6,height:80}}>
+          {weekDayNames.map((day,i)=>{const count=weekDayCounts[i];const bh=Math.max(4,Math.round((count/maxWeekCount)*72));const isToday=new Date().getDay()===i+1;return <div key={day} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+            {count>0&&<div style={{fontSize:9,color:C.textDim,fontFamily:C.mono}}>{count}</div>}
+            <div style={{width:"100%",height:bh,background:isToday?C.amber:count>0?"#FCD34D":C.border,borderRadius:"3px 3px 0 0",opacity:count>0?1:0.4}}/>
+            <div style={{fontSize:9,color:isToday?C.amber:C.textDim,fontWeight:isToday?700:400}}>{day}</div>
+          </div>;})}
+        </div>}
+    </div>
+    <SHead label="FULFILMENT RATE — LAST 7 DAYS"/>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      <div style={{display:"flex",gap:12,marginBottom:10}}>
+        {[["Fulfilled",C.green],["Partial",C.amber],["N/A",C.red]].map(([l,c])=><div key={l} style={{display:"flex",alignItems:"center",gap:4}}><div style={{width:8,height:8,borderRadius:2,background:c}}/><span style={{fontSize:10,color:C.textDim}}>{l}</span></div>)}
+      </div>
+      <div style={{display:"flex",alignItems:"flex-end",gap:4,height:90}}>
+        {fulfRateData.map(d=><div key={d.date} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+          <div style={{width:"100%",display:"flex",flexDirection:"column",height:75,justifyContent:"flex-end",gap:1}}>
+            {d.total>0?<>
+              <div style={{width:"100%",background:C.red,borderRadius:d.fulfilled===0&&d.partial===0?"3px 3px 0 0":"0",minHeight:d.na>0?3:0,height:`${d.na}%`}}/>
+              <div style={{width:"100%",background:C.amber,borderRadius:d.fulfilled===0?"3px 3px 0 0":"0",minHeight:d.partial>0?3:0,height:`${d.partial}%`}}/>
+              <div style={{width:"100%",background:C.green,borderRadius:"3px 3px 0 0",minHeight:d.fulfilled>0?3:0,height:`${d.fulfilled}%`}}/>
+            </>:<div style={{width:"100%",flex:1,background:C.border,borderRadius:"3px 3px 0 0",opacity:0.3}}/>}
+          </div>
+          <div style={{fontSize:8,color:C.textDim,textAlign:"center"}}>{d.date===TODAY?"Today":new Date(d.date).toLocaleDateString("en-IN",{day:"numeric",month:"short"})}</div>
+        </div>)}
+      </div>
+    </div>
+    <SHead label="TOP UNFULFILLED SKUs — LAST 7 DAYS"/>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      {topSkus.length===0
+        ?<div style={{textAlign:"center",color:C.textFaint,padding:"24px 0",fontSize:13}}>No unfulfilled items in the last 7 days 🎉</div>
+        :topSkus.map(([sku,missed])=><div key={sku} style={{marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontFamily:C.mono,fontWeight:700,fontSize:12,color:C.text}}>{sku}</span>
+            <span style={{fontFamily:C.mono,fontSize:12,color:C.red,fontWeight:600}}>×{missed} missed</span>
+          </div>
+          <div style={{background:C.border,borderRadius:4,height:6,overflow:"hidden"}}>
+            <div style={{width:`${Math.round((missed/maxSkuMiss)*100)}%`,height:"100%",background:C.red,borderRadius:4,opacity:0.75}}/>
+          </div>
+        </div>)}
+    </div>
+    <SHead label="STAFF PERFORMANCE — TODAY"/>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      {staffData.length===0
+        ?<div style={{textAlign:"center",color:C.textFaint,padding:"24px 0",fontSize:13}}>No items handled yet today.</div>
+        :staffData.map(s=><div key={s.name} style={{marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontSize:13,fontWeight:600,color:C.text}}>{s.name}</span>
+            <span style={{fontFamily:C.mono,fontSize:12,color:C.amber,fontWeight:700}}>{s.handled} items</span>
+          </div>
+          <div style={{background:C.border,borderRadius:4,height:7,overflow:"hidden"}}>
+            <div style={{width:`${Math.round((s.handled/maxStaff)*100)}%`,height:"100%",background:C.amber,borderRadius:4}}/>
+          </div>
+        </div>)}
+    </div>
+    <SHead label="PENDING CARRYOVER — AGE"/>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      {pendingOrdersList.length===0
+        ?<div style={{textAlign:"center",color:C.textFaint,padding:"24px 0",fontSize:13}}>No pending carryover orders.</div>
+        :<div style={{display:"flex",alignItems:"flex-end",gap:12,height:80,justifyContent:"center"}}>
+          {ageData.map(([label,count])=>{const barColor=label==="1 day"?C.amber:label==="2 days"?C.red:"#7F1D1D";return <div key={label} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+            <div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:barColor}}>{count}</div>
+            <div style={{width:"100%",height:Math.max(4,Math.round((count/maxAge)*68)),background:barColor,borderRadius:"4px 4px 0 0",opacity:0.85}}/>
+            <div style={{fontSize:10,color:C.textDim,textAlign:"center",lineHeight:1.3}}>{label}</div>
+          </div>;})}
+        </div>}
+    </div>
+  </>;
+}
+
 // ─── ADMIN APP ────────────────────────────────────────────────
 function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onOrderProcess,onOrderSendToBilling,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange,buyerGroups,onBuyerGroupChange,onAddAlias}){
   const [tab,setTab]=useState("orders");
@@ -1652,13 +1780,6 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   const tabs=[["orders","📋 Orders"],["analytics","📊 Analytics"],["historical","🗂 History"],["masterdata","⚙️ Master Data"]];
   const tabSt=a=>({flex:1,padding:"8px 4px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:a?700:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
   const today=orders.filter(o=>o.date===TODAY),older=orders.filter(o=>o.date!==TODAY);
-
-  // Analytics
-  const unfulfilled=[];orders.filter(o=>o.status!=="historical").forEach(o=>o.sections.forEach(sec=>sec.items.forEach(item=>{if(item.status==="unavailable"||item.status==="partial"){const reqQty=item.origQty||item.qty||0;const sentQty=item.status==="unavailable"?0:(item.qty||0);unfulfilled.push({sku:item.sku,customer:sec.name,orderId:o.id,date:o.date,type:item.status,reqQty,sentQty});}}))); 
-  const skuMap={};unfulfilled.forEach(e=>{if(!skuMap[e.sku])skuMap[e.sku]={sku:e.sku,naCount:0,partialCount:0,totalMissed:0,occurrences:[]};if(e.type==="unavailable")skuMap[e.sku].naCount++;else skuMap[e.sku].partialCount++;skuMap[e.sku].totalMissed+=e.reqQty-(e.sentQty||0);skuMap[e.sku].occurrences.push(e);});
-  const skus=Object.values(skuMap).sort((a,b)=>(b.naCount+b.partialCount)-(a.naCount+a.partialCount));
-  const totalNA=unfulfilled.filter(e=>e.type==="unavailable").length,totalPart=unfulfilled.filter(e=>e.type==="partial").length,totalMiss=unfulfilled.reduce((s,e)=>s+(e.reqQty-(e.sentQty||0)),0);
-  const maxVol=Math.max(...DAILY_VOLUME.map(d=>d.count));
 
   // Filtered SKUs for SKU tab
   const catSkus=activeCat?skuList.filter(s=>s.cat===activeCat.id):[];
@@ -2065,70 +2186,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
       </>}
 
       {/* ── ANALYTICS TAB ── */}
-      {tab==="analytics"&&<>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:18}}>
-          {[[totalNA,"N/A items",C.red],[totalPart,"Partial fills",C.amber],[totalMiss,"Units missed",C.text]].map(([v,l,c])=><div key={l} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 10px",textAlign:"center"}}>
-            <div style={{fontFamily:C.mono,fontWeight:700,fontSize:22,color:c}}>{v}</div>
-            <div style={{fontSize:10,color:C.textDim,marginTop:2}}>{l}</div>
-          </div>)}
-        </div>
-        <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:16,marginBottom:14}}>
-          <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:14}}>ORDER VOLUME — LAST 7 DAYS</div>
-          <div style={{display:"flex",alignItems:"flex-end",gap:6,height:80}}>
-            {DAILY_VOLUME.map(d=>{const bh=Math.round((d.count/maxVol)*68);return <div key={d.date} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-              <div style={{fontSize:10,color:C.textDim,fontFamily:C.mono}}>{d.count}</div>
-              <div style={{width:"100%",height:bh,background:C.amber,borderRadius:"4px 4px 0 0",opacity:0.8}}/>
-              <div style={{fontSize:10,color:C.textDim}}>{d.date}</div>
-            </div>;})}
-          </div>
-        </div>
-        <div style={{fontSize:11,fontWeight:700,color:C.amber,letterSpacing:"0.8px",marginBottom:8}}>PENDING ITEMS — LIVE ORDERS</div>
-        <PendingSkuTab orders={orders} onUpdate={(orderId,sIdx,iIdx,changes)=>onOrderUpdate(orderId,sIdx,iIdx,changes)}/>
-        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:8,marginTop:20}}>HISTORICAL — N/A & PARTIAL</div>
-        <div style={{fontSize:12,color:C.textDim,marginBottom:12}}>Tap any SKU to see affected orders.</div>
-        {skus.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"32px 0",fontSize:13}}>No unfulfilled items yet.</div>}
-        {skus.map(skuData=>{
-          const isExp=expandSku===skuData.sku,total=skuData.naCount+skuData.partialCount,naW=total>0?Math.round(skuData.naCount/total*100):0;
-          return <div key={skuData.sku} style={{background:"#fff",border:`1px solid ${isExp?C.redBd:C.border}`,borderRadius:12,marginBottom:10,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>
-            <div onClick={()=>setExpandSku(isExp?null:skuData.sku)} style={{padding:"14px 16px",cursor:"pointer"}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>{skuData.sku}</span>
-                <div style={{display:"flex",alignItems:"center",gap:6}}>
-                  {skuData.naCount>0&&<span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:4,background:C.redBg,color:C.red,border:`1px solid ${C.redBd}`}}>{skuData.naCount} N/A</span>}
-                  {skuData.partialCount>0&&<span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"2px 7px",borderRadius:4,background:C.amberBg,color:C.amber,border:`1px solid ${C.amberBd}`}}>{skuData.partialCount} partial</span>}
-                  <span style={{color:"#9CA3AF",fontSize:13}}>{isExp?"▲":"▼"}</span>
-                </div>
-              </div>
-              <div style={{background:"#F3F4F6",borderRadius:4,height:6,overflow:"hidden",display:"flex"}}>
-                <div style={{width:`${naW}%`,height:"100%",background:C.red}}/><div style={{flex:1,height:"100%",background:C.amber,opacity:0.7}}/>
-              </div>
-              <div style={{display:"flex",justifyContent:"space-between",marginTop:5}}>
-                <span style={{fontSize:11,color:C.textDim}}>{total} occurrence{total!==1?"s":""} · {skuData.totalMissed} units missed</span>
-                <span style={{fontSize:11,color:"#9CA3AF"}}>{isExp?"collapse":"expand"}</span>
-              </div>
-            </div>
-            {isExp&&<div style={{borderTop:"1px solid #F3F4F6",background:"#FAFAFA"}}>
-              {[...skuData.occurrences].sort((a,b)=>b.date.localeCompare(a.date)).map((occ,i,arr)=><div key={i} style={{padding:"10px 16px",borderBottom:i<arr.length-1?"1px solid #F3F4F6":"none",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                <div>
-                  <div style={{fontSize:13,fontWeight:600,color:C.text}}>{occ.customer}</div>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginTop:3}}>
-                    <span style={{fontFamily:C.mono,fontSize:11,color:C.textDim}}>{occ.orderId}</span>
-                    <span style={{fontSize:11,color:"#9CA3AF"}}>·</span>
-                    <span style={{fontSize:11,color:C.textDim}}>{fmtDate(occ.date)}</span>
-                  </div>
-                </div>
-                <div style={{textAlign:"right"}}>
-                  <Pill status={occ.type} small/>
-                  <div style={{fontSize:11,marginTop:4}}>{occ.type==="unavailable"?<span style={{color:C.red,fontWeight:600}}>req ×{occ.reqQty} · sent ×0</span>:<span>req ×{occ.reqQty} · <span style={{color:C.amber,fontWeight:600}}>sent ×{occ.sentQty}</span></span>}</div>
-                </div>
-              </div>)}
-            </div>}
-          </div>;
-        })}
-      </>}
-    </div>
-  </div>;
-}
+      {tab==="analytics"&&<AnalyticsTab orders={orders} users={users}/>}
 
 // ─── ROOT APP ─────────────────────────────────────────────────
 export default function App(){
