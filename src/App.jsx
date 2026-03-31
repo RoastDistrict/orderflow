@@ -211,6 +211,11 @@ const fuzzyMatchSku = (raw, skuList) => {
   const clean = raw.toUpperCase().trim();
   const {prefix:rawPfx, num:rawNum} = splitSku(clean);
 
+  // First check exact alias match across all SKUs
+  for (const sku of skuList) {
+    if ((sku.aliases||[]).some(a=>a.toUpperCase()===clean)) return {matched:sku.id, confidence:100};
+  }
+
   let best = null, bestScore = 0;
 
   for (const sku of skuList) {
@@ -1534,12 +1539,12 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
       {ready?<Btn onClick={onProcess||(() =>setBillingOpen(true))} color="green" sx={{width:"100%",padding:13,fontSize:14,gap:7,boxShadow:"0 2px 8px rgba(5,150,105,0.2)"}}>{onProcess?"💾 Save as Processed":t.sendToBilling}</Btn>
         :<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 0"}}>
           <span style={{fontSize:13,color:C.textDim}}>{pending.length} {t.itemsPending}</span>
-          <Btn onClick={()=>setBillingOpen(true)} color="ghost" sx={{padding:"8px 14px",fontSize:12,gap:5}}>{t.billAnyway}</Btn>
+          {isAdmin&&<Btn onClick={()=>setBillingOpen(true)} color="ghost" sx={{padding:"8px 14px",fontSize:12,gap:5}}>{t.billAnyway}</Btn>}
         </div>}
     </div>}
     {isProcessed&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 20px 16px",background:"#fff",display:"flex",flexDirection:"column",gap:8}}>
-      <div style={{background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.indigo,marginBottom:4}}>✓ All fulfilled items processed. Ready to send to billing.</div>
-      <Btn onClick={onSendToBilling} color="green" sx={{width:"100%",padding:13,fontSize:14,gap:7}}>{t.sendToBilling}</Btn>
+      <div style={{background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.indigo,marginBottom:4}}>{isAdmin?"✓ All fulfilled items processed. Ready to send to billing.":"✓ Order processed. Awaiting billing by admin."}</div>
+      {isAdmin&&<Btn onClick={onSendToBilling} color="green" sx={{width:"100%",padding:13,fontSize:14,gap:7}}>{t.sendToBilling}</Btn>}
       <Btn onClick={()=>{if(window.confirm("Reopen as Live? All items will be marked unfulfilled."))onReopen();}} color="amberO" sx={{width:"100%",padding:11,fontSize:13,gap:6}}>{t.reopenLive}</Btn>
     </div>}
     {isBilled&&onReopen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 20px 16px",background:"#fff"}}>
@@ -1675,8 +1680,27 @@ function AnalyticsTab({orders,users}){
             </>:<div style={{width:"100%",flex:1,background:C.border,borderRadius:"3px 3px 0 0",opacity:0.3}}/>}
           </div>
           <div style={{fontSize:8,color:C.textDim,textAlign:"center"}}>{d.date===TODAY?"Today":new Date(d.date).toLocaleDateString("en-IN",{day:"numeric",month:"short"})}</div>
+          {d.total>0&&<div style={{fontSize:8,fontFamily:C.mono,color:C.textDim,textAlign:"center",lineHeight:1.4}}>
+            <span style={{color:C.green}}>{d.fulfilled}%</span>
+            {d.partial>0&&<><br/><span style={{color:C.amber}}>{d.partial}%</span></>}
+            {d.na>0&&<><br/><span style={{color:C.red}}>{d.na}%</span></>}
+          </div>}
         </div>)}
       </div>
+      {fulfRateData.some(d=>d.total>0)&&<div style={{borderTop:`1px solid ${C.border}`,marginTop:14,paddingTop:12,display:"flex",gap:6,flexWrap:"wrap"}}>
+        {fulfRateData.filter(d=>d.total>0).map(d=>{
+          const fulfilledN=Math.round(d.total*d.fulfilled/100);
+          const partialN=Math.round(d.total*d.partial/100);
+          const naN=Math.round(d.total*d.na/100);
+          return <div key={d.date} style={{background:C.bg,borderRadius:8,padding:"8px 10px",fontSize:10,minWidth:80,flex:1}}>
+            <div style={{fontWeight:700,color:C.text,marginBottom:4,fontSize:10}}>{d.date===TODAY?"Today":new Date(d.date).toLocaleDateString("en-IN",{day:"numeric",month:"short"})}</div>
+            <div style={{color:C.textDim,marginBottom:2}}>{d.total} items</div>
+            <div style={{color:C.green}}>{fulfilledN} fulfilled</div>
+            {partialN>0&&<div style={{color:C.amber}}>{partialN} partial</div>}
+            {naN>0&&<div style={{color:C.red}}>{naN} N/A</div>}
+          </div>;
+        })}
+      </div>}
     </div>
     <SHead label="TOP UNFULFILLED SKUs — LAST 7 DAYS"/>
     <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
@@ -1741,6 +1765,8 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   const [editSkuId,setEditSkuId]=useState("");
   const [editSkuRate,setEditSkuRate]=useState("");
   const [editSkuCat,setEditSkuCat]=useState("");
+  const [editSkuAliases,setEditSkuAliases]=useState([]);
+  const [newSkuAlias,setNewSkuAlias]=useState("");
   const [showAddSku,setShowAddSku]=useState(false);
   const [newSkuId,setNewSkuId]=useState("");
   const [newSkuCat,setNewSkuCat]=useState("lam8");
@@ -2009,11 +2035,11 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
             <div style={{fontSize:11,color:C.textDim,marginBottom:10}}>{filteredSkus.length} SKUs</div>
             {filteredSkus.slice(0,150).map(sku=>{
               const effectiveRate=sku.rate!==undefined?sku.rate:activeCat.rate;
-              return <div key={sku.id} onClick={()=>{setActiveSku(sku);setEditSkuId(sku.id);setEditSkuRate(String(sku.rate!==undefined?sku.rate:""));setEditSkuCat(sku.cat);}}
+              return <div key={sku.id} onClick={()=>{setActiveSku(sku);setEditSkuId(sku.id);setEditSkuRate(String(sku.rate!==undefined?sku.rate:""));setEditSkuCat(sku.cat);setEditSkuAliases(sku.aliases||[]);setNewSkuAlias("");}}
                 style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 14px",marginBottom:6,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
                 onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
                 onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
-                <div style={{flex:1}}><div style={{fontFamily:C.mono,fontWeight:600,fontSize:13,color:C.text}}>{sku.id}</div></div>
+                <div style={{flex:1}}><div style={{fontFamily:C.mono,fontWeight:600,fontSize:13,color:C.text}}>{sku.id}</div>{(sku.aliases||[]).length>0&&<div style={{fontSize:10,color:C.textDim,marginTop:2}}>Aliases: {(sku.aliases||[]).join(", ")}</div>}</div>
                 <span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:sku.rate!==undefined?C.amber:C.textDim}}>Rs{effectiveRate?.toLocaleString("en-IN")||"--"}</span>
                 <span style={{color:C.textDim,fontSize:14}}>›</span>
               </div>;
@@ -2040,10 +2066,23 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
               <div style={{marginBottom:20}}>
                 <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>RATE (Rs per sheet)</div>
                 <input type="number" value={editSkuRate} onChange={e=>setEditSkuRate(e.target.value)} placeholder="Leave blank for category default" style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
-                <div style={{fontSize:11,color:editSkuRate?C.amber:C.textDim,marginTop:4}}>{editSkuRate?"Custom rate overrides category default":"Blank = use category default"}</div>
+               <div style={{fontSize:11,color:editSkuRate?C.amber:C.textDim,marginTop:4}}>{editSkuRate?"Custom rate overrides category default":"Blank = use category default"}</div>
+              </div>
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:6,fontWeight:600}}>ALIASES</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
+                  {editSkuAliases.map((a,i)=><span key={i} style={{display:"flex",alignItems:"center",gap:4,fontFamily:C.mono,fontSize:11,background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:6,padding:"3px 8px",color:C.amber}}>
+                    {a}<button onClick={()=>setEditSkuAliases(editSkuAliases.filter((_,j)=>j!==i))} style={{background:"none",border:"none",cursor:"pointer",color:C.amber,fontSize:12,padding:0,lineHeight:1,marginLeft:2}}>✕</button>
+                  </span>)}
+                  {editSkuAliases.length===0&&<span style={{fontSize:11,color:C.textFaint}}>No aliases yet</span>}
+                </div>
+                <div style={{display:"flex",gap:6}}>
+                  <input value={newSkuAlias} onChange={e=>setNewSkuAlias(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newSkuAlias.trim()){const t=newSkuAlias.trim().toUpperCase();if(!editSkuAliases.includes(t))setEditSkuAliases([...editSkuAliases,t]);setNewSkuAlias("");}}} placeholder="e.g. HG-1102, HG1102…" style={{flex:1,padding:"8px 10px",borderRadius:7,border:`1px solid ${C.borderMd}`,fontSize:12,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff"}}/>
+                  <Btn onClick={()=>{const t=newSkuAlias.trim().toUpperCase();if(!t)return;if(!editSkuAliases.includes(t))setEditSkuAliases([...editSkuAliases,t]);setNewSkuAlias("");}} color="ghost" sx={{padding:"8px 12px",fontSize:11}}>Add</Btn>
+                </div>
               </div>
               <div style={{display:"flex",gap:8}}>
-                <Btn onClick={()=>{const updates={...activeSku,id:editSkuId.trim().toUpperCase(),cat:editSkuCat};if(editSkuRate)updates.rate=parseInt(editSkuRate);else delete updates.rate;if(updates.id!==activeSku.id)onSkuChange("delete",activeSku.id);onSkuChange("add",updates);setActiveSku(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
+                <Btn onClick={()=>{const updates={...activeSku,id:editSkuId.trim().toUpperCase(),cat:editSkuCat,aliases:editSkuAliases};if(editSkuRate)updates.rate=parseInt(editSkuRate);else delete updates.rate;if(updates.id!==activeSku.id)onSkuChange("delete",activeSku.id);onSkuChange("add",updates);setActiveSku(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
                 <Btn onClick={()=>{if(window.confirm("Delete "+activeSku.id+"?")){onSkuChange("delete",activeSku.id);setActiveSku(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
               </div>
             </div>
