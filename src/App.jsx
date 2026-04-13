@@ -385,10 +385,10 @@ function StaffSelect({users,onSelect,onBack,lang}){
   </div>;
 }
 
-function PendingSkuTab({orders,onUpdate,lang="en"}){
+function PendingSkuTab({orders,onUpdate,lang="en",source="live"}){
   const t=T[lang];
   const [expandSku,setExpandSku]=useState(null);
-  const liveOrders=orders.filter(o=>o.status==="live");
+  const liveOrders=orders.filter(o=>o.status===source);
   const skuMap={};
   liveOrders.forEach(order=>{
     order.sections.forEach((sec,sIdx)=>{
@@ -439,6 +439,24 @@ function PendingSkuTab({orders,onUpdate,lang="en"}){
         </div>}
       </div>;
     })}
+  </>;
+}
+
+// ─── PENDING ORDER TAB (staff) ───────────────────────────────
+function PendingOrderTab({orders,pendingOrders,filterOrders,onOpenOrder,onEditOrder,onReopenOrder,onItemUpdate,lang,buyerList,t}){
+  const [view,setView]=useState("party"); // party | sku
+  const toggleSt=a=>({flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:12,fontWeight:a?600:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
+  return <>
+    <div style={{background:C.redBg,border:`1px solid ${C.redBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.red,marginBottom:12}}>{t.pendingOrdersInfo}</div>
+    <div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:12}}>
+      <button onClick={()=>setView("party")} style={toggleSt(view==="party")}>👤 {lang==="hi"?"पार्टी नाम":"By Party"}</button>
+      <button onClick={()=>setView("sku")} style={toggleSt(view==="sku")}>📦 {lang==="hi"?"SKU वार":"By SKU"}</button>
+    </div>
+    {view==="party"&&<>
+      {filterOrders(pendingOrders).length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noPendingOrders}</div>}
+      {filterOrders(pendingOrders).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}
+    </>}
+    {view==="sku"&&<PendingSkuTab orders={orders} onUpdate={onItemUpdate} lang={lang} source="pending-order"/>}
   </>;
 }
 
@@ -498,11 +516,7 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut,onEditOrde
         {live.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noOrdersToday}</div>}
       </>}
       {tab==="pending"&&<PendingSkuTab orders={orders} onUpdate={onItemUpdate} lang={lang}/>}
-      {tab==="pending-order"&&<>
-        <div style={{background:C.redBg,border:`1px solid ${C.redBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.red,marginBottom:12}}>{t.pendingOrdersInfo}</div>
-        {filterOrders(pendingOrders).length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noPendingOrders}</div>}
-        {filterOrders(pendingOrders).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}
-      </>}
+      {tab==="pending-order"&&<PendingOrderTab orders={orders} pendingOrders={pendingOrders} filterOrders={filterOrders} onOpenOrder={onOpenOrder} onEditOrder={onEditOrder} onReopenOrder={onReopenOrder} onItemUpdate={onItemUpdate} lang={lang} buyerList={buyerList} t={t}/>}
       {tab==="processed"&&<>
         {filterOrders(processed).length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noProcessedOrders}</div>}
         {filterOrders(processed).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}
@@ -1793,6 +1807,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
   const [mdSection,setMdSection]=useState("users"); // users | skus | buyers
   // Orders tab filter
   const [orderFilter,setOrderFilter]=useState("live"); // live | pending-order | processed | billed
+  const [pendingView,setPendingView]=useState("party"); // party | sku
   const [orderSearch,setOrderSearch]=useState("");
   const [histSearch,setHistSearch]=useState("");
   const [histDateFilter,setHistDateFilter]=useState("");
@@ -1852,12 +1867,17 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
             <span style={{flex:1,fontSize:13,color:C.red,fontWeight:600}}>{bulkSelected.length} order{bulkSelected.length>1?"s":""} selected</span>
             <Btn onClick={()=>{if(window.confirm(`Delete ${bulkSelected.length} orders?`)){bulkSelected.forEach(id=>onDeleteOrder(id));setSelectedOrders(new Set());}}} color="danger" sx={{padding:"7px 12px",fontSize:12}}>🗑 Delete All</Btn>
             <Btn onClick={()=>setSelectedOrders(new Set())} color="ghost" sx={{padding:"7px 10px",fontSize:12}}>✕ Clear</Btn>
+          {orderFilter==="pending-order"&&<div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:12}}>
+            <button onClick={()=>setPendingView("party")} style={{flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:12,fontWeight:pendingView==="party"?600:400,background:pendingView==="party"?"#fff":"transparent",color:pendingView==="party"?C.text:C.textDim,boxShadow:pendingView==="party"?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>👤 By Party</button>
+            <button onClick={()=>setPendingView("sku")} style={{flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:12,fontWeight:pendingView==="sku"?600:400,background:pendingView==="sku"?"#fff":"transparent",color:pendingView==="sku"?C.text:C.textDim,boxShadow:pendingView==="sku"?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>📦 By SKU</button>
           </div>}
-          {filteredOrders.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>No {orderFilter} orders.</div>}
+          {orderFilter==="pending-order"&&pendingView==="sku"
+            ?<PendingSkuTab orders={orders} onUpdate={(orderId,sIdx,iIdx,changes)=>onOrderUpdate(orderId,sIdx,iIdx,changes)} source="pending-order"/>
+            :<>{filteredOrders.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>No {orderFilter} orders.</div>}
           {filteredOrders.map(o=><div key={o.id} style={{display:"flex",alignItems:"flex-start",gap:8}}>
             <input type="checkbox" checked={selectedOrders.has(o.id)} onChange={()=>toggleOrderSelect(o.id)} style={{marginTop:18,flexShrink:0,width:16,height:16,cursor:"pointer"}}/>
             <div style={{flex:1}}><OrderCard order={o} onOpen={setActiveOId} onDelete={onDeleteOrder} onEdit={setActiveOId} onReopen={id=>onOrderReopen(id)} dim={o.status==="billed"||o.status==="processed"} buyerList={buyerList}/></div>
-          </div>)}
+          </div>)}</>}
         </>;
       })()}
 
