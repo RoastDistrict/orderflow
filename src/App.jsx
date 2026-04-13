@@ -1867,6 +1867,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
             <span style={{flex:1,fontSize:13,color:C.red,fontWeight:600}}>{bulkSelected.length} order{bulkSelected.length>1?"s":""} selected</span>
             <Btn onClick={()=>{if(window.confirm(`Delete ${bulkSelected.length} orders?`)){bulkSelected.forEach(id=>onDeleteOrder(id));setSelectedOrders(new Set());}}} color="danger" sx={{padding:"7px 12px",fontSize:12}}>🗑 Delete All</Btn>
             <Btn onClick={()=>setSelectedOrders(new Set())} color="ghost" sx={{padding:"7px 10px",fontSize:12}}>✕ Clear</Btn>
+          </div>}
           {orderFilter==="pending-order"&&<div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:12}}>
             <button onClick={()=>setPendingView("party")} style={{flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:12,fontWeight:pendingView==="party"?600:400,background:pendingView==="party"?"#fff":"transparent",color:pendingView==="party"?C.text:C.textDim,boxShadow:pendingView==="party"?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>👤 By Party</button>
             <button onClick={()=>setPendingView("sku")} style={{flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:12,fontWeight:pendingView==="sku"?600:400,background:pendingView==="sku"?"#fff":"transparent",color:pendingView==="sku"?C.text:C.textDim,boxShadow:pendingView==="sku"?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>📦 By SKU</button>
