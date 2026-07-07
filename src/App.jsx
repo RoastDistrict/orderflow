@@ -1,22 +1,30 @@
 import React, { useState, useRef, useEffect } from "react";
 import { initializeApp } from "firebase/app";
 import { getDatabase, ref, set, onValue, remove, update } from "firebase/database";
+import { getAuth, signInAnonymously } from "firebase/auth";
 import skuData from "./skus.json";
 import buyerData from "./buyers.json";
 import buyerGroupData from "./buyerGroups.json";
 
 // ─── FIREBASE ─────────────────────────────────────────────────
+// Firebase config is env-driven so a preview/test deploy can point at a separate
+// Firebase project WITHOUT any code change. When the VITE_FIREBASE_* vars are unset
+// (production + local dev) it falls back to the live orderflow-defa4 project.
+// Testing-V2: set these as Vercel *Preview*-scoped env vars → the orderflowv2 test project.
 const firebaseConfig = {
-  apiKey:            "AIzaSyBVB_v9fYMzOs_FsdMmfyNzLqc0fP9r6XA",
-  authDomain:        "orderflow-defa4.firebaseapp.com",
-  databaseURL:       "https://orderflow-defa4-default-rtdb.firebaseio.com",
-  projectId:         "orderflow-defa4",
-  storageBucket:     "orderflow-defa4.firebasestorage.app",
-  messagingSenderId: "596338428100",
-  appId:             "1:596338428100:web:7f6af203922e459ea0e191",
+  apiKey:            import.meta.env.VITE_FIREBASE_API_KEY             || "AIzaSyBVB_v9fYMzOs_FsdMmfyNzLqc0fP9r6XA",
+  authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN         || "orderflow-defa4.firebaseapp.com",
+  databaseURL:       import.meta.env.VITE_FIREBASE_DATABASE_URL        || "https://orderflow-defa4-default-rtdb.firebaseio.com",
+  projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID          || "orderflow-defa4",
+  storageBucket:     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET      || "orderflow-defa4.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "596338428100",
+  appId:             import.meta.env.VITE_FIREBASE_APP_ID              || "1:596338428100:web:7f6af203922e459ea0e191",
 };
+if (firebaseConfig.projectId !== "orderflow-defa4") console.info("[OrderFlow] Firebase project:", firebaseConfig.projectId, "(non-production DB)");
 const fbApp = initializeApp(firebaseConfig);
 const db    = getDatabase(fbApp);
+const fbAuth = getAuth(fbApp);
+signInAnonymously(fbAuth).catch(e => console.error("Anonymous auth failed:", e));
 
 // ─── FIREBASE WRITE WRAPPERS ──────────────────────────────────
 // Surface failed writes instead of failing silently (important for billing
@@ -74,6 +82,8 @@ const T = {
     noOrdersToday:"No orders yet today.", noPastOrders:"No past orders.",
     noPendingItems:"No pending items across live orders.",
     pendingSkusHeader:"PENDING SKUS — ACROSS ALL LIVE ORDERS",
+    pendingByCatHeader:"PENDING BY CATEGORY — FACTORY VIEW",
+    uncategorised:"Uncategorised",
     done:"✓ Done", na:"✕ N/A",
     pendingOrdersInfo:"Unfulfilled items from previously billed orders.",
     noPendingOrders:"No pending orders.",
@@ -114,6 +124,8 @@ const T = {
     customSkuWarning:"⚠ Custom SKU — not in master list. Verify or replace.",
     confirmSku:"✓ Confirm SKU",
     addNote:"+ Add note", removeNote:"✕ Remove note", removeSection:"🗑 Remove",
+    today:"Today", processedAwaiting:"Processed — awaiting billing",
+    scanInstead:"📷 Scan slip photo", viewOrders:"Orders", viewBySku:"📦 By SKU",
   },
   hi: {
     tagline:"ऑर्डर प्रबंधन · त्रुटि निवारण",
@@ -127,6 +139,8 @@ const T = {
     noOrdersToday:"आज कोई ऑर्डर नहीं।", noPastOrders:"कोई पुराना ऑर्डर नहीं।",
     noPendingItems:"लाइव ऑर्डर में कोई बाकी आइटम नहीं।",
     pendingSkusHeader:"बाकी SKU — सभी लाइव ऑर्डर",
+    pendingByCatHeader:"श्रेणी अनुसार बाकी — फैक्ट्री व्यू",
+    uncategorised:"बिना श्रेणी",
     done:"✓ हो गया", na:"✕ नहीं है",
     pendingOrdersInfo:"पहले बिल हुए ऑर्डर के अधूरे आइटम।",
     noPendingOrders:"कोई पेंडिंग ऑर्डर नहीं।",
@@ -167,6 +181,8 @@ const T = {
     customSkuWarning:"⚠ Custom SKU — मास्टर लिस्ट में नहीं। जांचें या बदलें।",
     confirmSku:"✓ SKU पुष्टि करें",
     addNote:"+ नोट जोड़ें", removeNote:"✕ नोट हटाएं", removeSection:"🗑 हटाएं",
+    today:"आज", processedAwaiting:"प्रोसेस्ड — बिलिंग बाकी",
+    scanInstead:"📷 स्लिप फोटो स्कैन करें", viewOrders:"ऑर्डर", viewBySku:"📦 SKU वार",
   }
 };
 
@@ -195,6 +211,57 @@ const getRateForSku = (skuCode, skuList, catList = []) => {
   if (found.rate != null) return found.rate; // explicit SKU rate (incl. 0) wins
   const cat = catList.find((c) => c.id === found.cat);
   return cat?.rate ?? 0;
+};
+
+// Party-wise rate: a buyer-specific absolute rate (stored at
+// partyRates/{buyerId}/skus/{sanitizedSku}) wins; otherwise fall back to the
+// global SKU/category rate. buyerId null/unknown ⇒ global rate only.
+const getPartyRate = (buyerId, skuCode, partyRates = {}, skuList = [], catList = []) => {
+  const list = getRateForSku(skuCode, skuList, catList);
+  if (buyerId != null && skuCode != null) {
+    const key = String(skuCode).replace(/[^a-zA-Z0-9]/g, "_");
+    const pr = partyRates?.[buyerId]?.skus;
+    if (pr && pr[key] != null) return pr[key];                    // per-SKU absolute override wins
+    const sku = skuList.find((s) => s.id && s.id.toUpperCase() === String(skuCode).toUpperCase());
+    const fd = sku && partyRates?.[buyerId]?.folders?.[sku.cat];  // per-folder discount (% or flat)
+    if (fd && list != null) {
+      const v = Number(fd.value) || 0;
+      const net = fd.mode === "flat" ? list - v : list * (1 - v / 100);
+      return Math.max(0, Math.round(net * 100) / 100);
+    }
+  }
+  return list;
+};
+
+// Owner buckets → buyer groups. Archit = own direct ledgers (SD); All = every group.
+const OWNER_BUCKETS = [
+  { id: "archit", label: "Archit", groups: ["SD"] },
+  { id: "dinesh", label: "Dinesh", groups: ["DIN"] },
+  { id: "vernit", label: "Vernit", groups: ["VER"] },
+  { id: "all", label: "All ledgers", groups: null },
+];
+
+// ─── BILLING LINE: UNIT CONVERSION + GST ──────────────────────
+// Resolves one billable line. Applies the folder's billing unit (WPC is priced
+// per sq ft; an 8×4 board = cat.boardSqft sq ft, so qty[boards]×boardSqft) and
+// intra-state GST (CGST+SGST, added only when the folder is GST-exclusive).
+// Legacy data (category has no unit/gst fields) → qty as-is, no GST, so this is
+// fully backward-compatible with the current live master.
+const billLine = (skuCode, qty, rate, skuList = [], catList = []) => {
+  const sku = skuList.find((s) => s.id && s.id.toUpperCase() === String(skuCode).toUpperCase());
+  const cat = sku ? catList.find((c) => c.id === sku.cat) : null;
+  let units = qty, eff = rate || 0, unit = (cat && cat.unit) || "per_sheet";
+  if (cat && cat.unit === "per_sqft") {            // priced per sq ft, BILLED in sq m
+    const boardSqm = cat.boardSqm || (cat.boardSqft || 32) * 0.092903;
+    units = Math.round(qty * boardSqm * 1000) / 1000;       // sq m
+    eff = Math.round((rate || 0) * 10.7639 * 100) / 100;    // ₹ per sq m (from ₹/sq ft)
+    unit = "per_sqm";
+  }
+  const base = Math.round(eff * units * 100) / 100;
+  const taxable = !!cat && cat.gstIncluded === false;
+  const cgst = taxable ? Math.round(base * (cat.cgst ?? 9)) / 100 : 0;
+  const sgst = taxable ? Math.round(base * (cat.sgst ?? 9)) / 100 : 0;
+  return { units, unit, rate: eff, base, cgst, sgst, total: Math.round((base + cgst + sgst) * 100) / 100 };
 };
 
 // ─── FUZZY SKU MATCHER ────────────────────────────────────────
@@ -235,10 +302,18 @@ const fuzzyMatchSku = (raw, skuList) => {
     if ((sku.aliases||[]).some(a=>a.toUpperCase()===clean)) return {matched:sku.id, confidence:100};
   }
 
+  // Exact bare-code match. MICA master ids carry a thickness suffix (e.g. "HG 81112 .92MM");
+  // sku.code holds the bare matchable code ("HG 81112"). Falls back to id when code is absent,
+  // so this is a no-op for legacy data where code is undefined.
+  const codeOf = (s) => (s.code || s.id || "").toUpperCase().trim();
+  const codeHits = skuList.filter((s) => codeOf(s) === clean);
+  if (codeHits.length === 1) return { matched: codeHits[0].id, confidence: 100 };
+  if (codeHits.length > 1) return { matched: codeHits[0].id, confidence: 90 }; // same code, different thickness/folder → review
+
   let best = null, bestScore = 0;
 
   for (const sku of skuList) {
-    const {prefix:skuPfx, num:skuNum} = splitSku(sku.id);
+    const {prefix:skuPfx, num:skuNum} = splitSku(codeOf(sku));
 
     // ── Rule 1: prefix MUST match exactly (HC≠FC, HG≠HGG allowed with penalty)
     if (rawPfx !== skuPfx) {
@@ -307,6 +382,24 @@ function Btn({children,onClick,color="amber",sx={}}){
 }
 function GrpLabel({label,color}){return <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,marginTop:4}}><div style={{width:6,height:6,borderRadius:3,background:color,flexShrink:0}}/><span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,letterSpacing:"1px",color:C.textDim}}>{label.toUpperCase()}</span></div>;}
 
+// ─── UI PRIMITIVES (2026-07-03 UI revamp) ─────────────────────
+// EmptyState: friendly empty placeholder with icon + optional hint.
+function EmptyState({icon="📭",title,sub}){
+  return <div style={{textAlign:"center",padding:"52px 20px"}}>
+    <div style={{fontSize:34,marginBottom:10,opacity:0.85}}>{icon}</div>
+    <div style={{fontSize:14,fontWeight:600,color:C.textDim}}>{title}</div>
+    {sub&&<div style={{fontSize:12,color:C.textFaint,marginTop:4}}>{sub}</div>}
+  </div>;
+}
+// Seg: shared segmented control (replaces the per-screen toggle style copies).
+// options = [[key,label],...]. size "sm" for dense in-content toggles.
+function Seg({options,value,onChange,size="md"}){
+  const st=a=>({flex:1,padding:size==="sm"?"7px 0":"10px 0",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:size==="sm"?12:13,fontWeight:a?700:500,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none",minHeight:size==="sm"?34:42});
+  return <div style={{display:"flex",gap:3,background:C.bg,borderRadius:9,padding:3,border:`1px solid ${C.border}`,marginBottom:12}}>
+    {options.map(([k,l])=><button key={k} onClick={()=>onChange(k)} style={st(value===k)}>{l}</button>)}
+  </div>;
+}
+
 function OrderCard({order,onOpen,onDelete,onEdit,onReopen,dim=false,lang="en",buyerList=[]}){
   const {done,total,pct}=progData(order);
   const ready=isReady(order),billed=order.status==="billed",processed=order.status==="processed";
@@ -350,7 +443,10 @@ const idBd=billed?C.border:processed?(hasPartialOrNA?C.amberBd:C.border):ready?C
           <div style={{flex:1,minWidth:0}}>
             <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:8}}>
               <div style={{fontSize:13,fontWeight:600,color:C.text,lineHeight:1.4}}>{names}</div>
-              <Pill status={billed?"billed":processed?"processed":ready?"fulfilled":"pending"}/>
+              <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+                <Pill status={billed?"billed":processed?"processed":ready?"fulfilled":"pending"}/>
+                {(onEdit||onDelete||onReopen)&&<button onClick={e=>{e.stopPropagation();setMenuOpen(true);}} aria-label="Order actions" style={{width:28,height:28,borderRadius:7,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:16,lineHeight:1,padding:0}}>⋯</button>}
+              </div>
             </div>
             <div style={{fontSize:11,color:C.textDim,marginTop:3}}>{fmtDate(order.date)} · {order.scannedAt} · {total} items</div>
           </div>
@@ -371,7 +467,7 @@ function LangToggle({lang,setLang}){
 }
 
 // ─── CHOOSE SCREEN (no PIN) ───────────────────────────────────
-function ChooseScreen({onStaff,onAdmin,lang,setLang}){
+function ChooseScreen({onStaff,onAdmin,onOwner,lang,setLang}){
   const t=T[lang];
   return <div style={{minHeight:620,background:"#fff",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:32,position:"relative"}}>
     <div style={{position:"absolute",top:16,right:16}}><LangToggle lang={lang} setLang={setLang}/></div>
@@ -386,6 +482,10 @@ function ChooseScreen({onStaff,onAdmin,lang,setLang}){
         <span style={{fontSize:28,flexShrink:0}}>🔐</span>
         <div><div style={{fontWeight:700,fontSize:15,color:C.amber,marginBottom:2}}>{t.admin}</div><div style={{fontSize:12,color:"#92610A"}}>{t.adminSub}</div></div>
       </button>
+      <button onClick={onOwner} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.indigoBd}`,background:C.indigoBg,cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left"}}>
+        <span style={{fontSize:28,flexShrink:0}}>📒</span>
+        <div><div style={{fontWeight:700,fontSize:15,color:C.indigo,marginBottom:2}}>Owner</div><div style={{fontSize:12,color:C.indigo}}>Per-party folder rates &amp; ledgers</div></div>
+      </button>
     </div>
   </div>;
 }
@@ -398,7 +498,7 @@ function StaffSelect({users,onSelect,onBack,lang}){
     <button onClick={onBack} style={{position:"absolute",top:16,left:16,background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:4}}>←</button>
     <div style={{fontSize:13,fontWeight:600,color:C.textDim,marginBottom:20,letterSpacing:"0.5px"}}>{t.whoAreYou}</div>
     <div style={{width:"100%",maxWidth:320,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-      {active.map(u=><button key={u.id} onClick={()=>onSelect(u.id)} style={{padding:14,borderRadius:10,cursor:"pointer",background:"#fff",border:`1px solid ${C.borderMd}`,color:C.text,fontWeight:600,fontSize:15,fontFamily:C.sans}}>{u.name}</button>)}
+      {active.map(u=><button key={u.id} onClick={()=>onSelect(u.id)} style={{padding:16,minHeight:56,borderRadius:12,cursor:"pointer",background:"#fff",border:`1px solid ${C.borderMd}`,color:C.text,fontWeight:600,fontSize:15,fontFamily:C.sans,boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>{u.name}</button>)}
     </div>
   </div>;
 }
@@ -444,59 +544,68 @@ function PasswordGate({title,expected,onSuccess,onBack}){
       placeholder="••••"
       style={{width:"100%",maxWidth:240,padding:"12px 14px",borderRadius:10,border:`1px solid ${err?C.redBd:C.borderMd}`,fontSize:18,fontFamily:C.mono,letterSpacing:4,textAlign:"center",outline:"none",color:C.text,background:err?C.redBg:"#fff",boxSizing:"border-box"}}/>
     {err&&<div style={{fontSize:12,color:C.red,marginTop:10}}>Incorrect password</div>}
-    <button onClick={submit} style={{width:"100%",maxWidth:240,marginTop:16,padding:12,borderRadius:10,border:"none",background:C.amber,color:"#fff",fontWeight:700,fontSize:14,fontFamily:C.sans,cursor:"pointer"}}>Continue →</button>
+    <button onClick={submit} style={{width:"100%",maxWidth:240,marginTop:16,padding:14,minHeight:48,borderRadius:12,border:"none",background:C.amber,color:"#fff",fontWeight:700,fontSize:14,fontFamily:C.sans,cursor:"pointer",boxShadow:"0 2px 8px rgba(217,119,6,0.25)"}}>Continue →</button>
   </div>;
 }
 
-function PendingSkuTab({orders,onUpdate,lang="en",source="live",onMoveToLive}){
+function PendingSkuTab({orders,onUpdate,lang="en",source="live",onMoveToLive,skuList=[],catList=[]}){
   const t=T[lang];
-  const [expandSku,setExpandSku]=useState(null);
+  const [expandKey,setExpandKey]=useState(null);
+  const [groupBy,setGroupBy]=useState("sku"); // sku | cat
   const [menuFor,setMenuFor]=useState(null); // {orderId,sIdx,iIdx,buyer}
   const pressTimer=useRef(null);
   const canMove=!!onMoveToLive;
+  const canCat=skuList.length>0;
+  const mode=canCat?groupBy:"sku";
   const startPress=(occ)=>{if(!canMove)return;pressTimer.current=setTimeout(()=>setMenuFor({orderId:occ.orderId,sIdx:occ.sIdx,iIdx:occ.iIdx,buyer:occ.buyer}),500);};
   const cancelPress=()=>{if(pressTimer.current){clearTimeout(pressTimer.current);pressTimer.current=null;}};
+  const catNameOf=(skuCode)=>{const s=skuList.find(x=>x.id&&x.id.toUpperCase()===String(skuCode).toUpperCase());if(!s)return t.uncategorised;const c=catList.find(c=>c.id===s.cat);return c?.name||s._catName||t.uncategorised;};
   const liveOrders=orders.filter(o=>o.status===source);
-  const skuMap={};
+  const groupMap={};
   liveOrders.forEach(order=>{
     order.sections.forEach((sec,sIdx)=>{
       sec.items.forEach((item,iIdx)=>{
         if(item.status!=="pending")return;
-        if(!skuMap[item.sku])skuMap[item.sku]={sku:item.sku,totalQty:0,orders:[]};
-        skuMap[item.sku].totalQty+=item.origQty;
-        skuMap[item.sku].orders.push({orderId:order.id,buyer:sec.name,qty:item.origQty,sIdx,iIdx,orderRef:order});
+        const key=mode==="cat"?catNameOf(item.sku):item.sku;
+        if(!groupMap[key])groupMap[key]={key,totalQty:0,orders:[],skuSet:{}};
+        groupMap[key].totalQty+=item.origQty;
+        groupMap[key].skuSet[item.sku]=(groupMap[key].skuSet[item.sku]||0)+item.origQty;
+        groupMap[key].orders.push({orderId:order.id,buyer:sec.name,qty:item.origQty,sku:item.sku,sIdx,iIdx,orderRef:order});
       });
     });
   });
-  const skus=Object.values(skuMap).sort((a,b)=>b.totalQty-a.totalQty);
-
-  if(skus.length===0)return <div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noPendingItems}</div>;
+  const rows=Object.values(groupMap).sort((a,b)=>b.totalQty-a.totalQty);
 
   return <>
-    <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:12}}>{t.pendingSkusHeader}</div>
-    {skus.map(skuRow=>{
-      const isExp=expandSku===skuRow.sku;
-      const allFulfilled=skuRow.orders.every(o=>o.orderRef.sections[o.sIdx].items[o.iIdx].status!=="pending");
-      return <div key={skuRow.sku} style={{background:"#fff",border:`1px solid ${isExp?C.amberBd:C.border}`,borderRadius:12,marginBottom:10,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>
-        <div onClick={()=>setExpandSku(isExp?null:skuRow.sku)} style={{padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
+    {canCat&&<Seg size="sm" value={mode} onChange={k=>{setGroupBy(k);setExpandKey(null);}} options={[["sku","📦 "+(lang==="hi"?"SKU वार":"By SKU")],["cat","🏭 "+(lang==="hi"?"श्रेणी वार":"By Category")]]}/>}
+    {rows.length===0
+      ?<EmptyState icon="📦" title={t.noPendingItems}/>
+      :<>
+    <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:12}}>{mode==="cat"?t.pendingByCatHeader:t.pendingSkusHeader}</div>
+    {rows.map(row=>{
+      const isExp=expandKey===row.key;
+      const allFulfilled=row.orders.every(o=>o.orderRef.sections[o.sIdx].items[o.iIdx].status!=="pending");
+      const skuCount=Object.keys(row.skuSet).length;
+      return <div key={row.key} style={{background:"#fff",border:`1px solid ${isExp?C.amberBd:C.border}`,borderRadius:12,marginBottom:10,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>
+        <div onClick={()=>setExpandKey(isExp?null:row.key)} style={{padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
           <div style={{flex:1}}>
-            <div style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:allFulfilled?C.green:C.text}}>{skuRow.sku}</div>
-            <div style={{fontSize:11,color:C.textDim,marginTop:3}}>{skuRow.orders.length} order{skuRow.orders.length>1?"s":""}</div>
+            <div style={{fontFamily:mode==="cat"?C.sans:C.mono,fontWeight:700,fontSize:14,color:allFulfilled?C.green:C.text}}>{row.key}</div>
+            <div style={{fontSize:11,color:C.textDim,marginTop:3}}>{mode==="cat"?`${skuCount} SKU${skuCount>1?"s":""} · `:""}{row.orders.length} order{row.orders.length>1?"s":""}</div>
           </div>
-          <div style={{fontFamily:C.mono,fontWeight:700,fontSize:18,color:allFulfilled?C.green:C.amber}}>×{skuRow.totalQty}</div>
+          <div style={{fontFamily:C.mono,fontWeight:700,fontSize:18,color:allFulfilled?C.green:C.amber}}>×{row.totalQty}</div>
           <span style={{color:C.textDim,fontSize:13}}>{isExp?"▲":"▼"}</span>
         </div>
         {isExp&&<div style={{borderTop:`1px solid ${C.border}`,background:C.bg}}>
-          {skuRow.orders.map((occ,i)=>{
+          {row.orders.map((occ,i)=>{
             const liveItem=occ.orderRef.sections[occ.sIdx].items[occ.iIdx];
             const isPending=liveItem.status==="pending";
-            return <div key={i} style={{padding:"12px 16px",borderBottom:i<skuRow.orders.length-1?`1px solid ${C.border}`:"none",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+            return <div key={i} style={{padding:"12px 16px",borderBottom:i<row.orders.length-1?`1px solid ${C.border}`:"none",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
               <div
                 onMouseDown={()=>isPending&&startPress(occ)} onMouseUp={cancelPress} onMouseLeave={cancelPress}
                 onTouchStart={()=>isPending&&startPress(occ)} onTouchEnd={cancelPress} onTouchCancel={cancelPress}
                 style={{flex:1,cursor:canMove&&isPending?"pointer":"default",userSelect:"none",WebkitUserSelect:"none"}}>
                 <div style={{fontSize:13,fontWeight:600,color:C.text}}>{occ.buyer}{canMove&&isPending&&<span style={{fontSize:9,color:C.textFaint,marginLeft:6,fontWeight:400}}>⟶ hold to move</span>}</div>
-                <div style={{fontFamily:C.mono,fontSize:11,color:C.textDim,marginTop:2}}>{occ.orderId} · ×{occ.qty}</div>
+                <div style={{fontFamily:C.mono,fontSize:11,color:C.textDim,marginTop:2}}>{mode==="cat"?occ.sku+" · ":""}{occ.orderId} · ×{occ.qty}</div>
               </div>
               {isPending
                 ?<div style={{display:"flex",gap:6}}>
@@ -510,6 +619,7 @@ function PendingSkuTab({orders,onUpdate,lang="en",source="live",onMoveToLive}){
         </div>}
       </div>;
     })}
+      </>}
     {menuFor&&<div onClick={e=>{if(e.target===e.currentTarget)setMenuFor(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 28px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
@@ -517,39 +627,37 @@ function PendingSkuTab({orders,onUpdate,lang="en",source="live",onMoveToLive}){
           <button onClick={()=>setMenuFor(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
         </div>
         <div style={{fontSize:12,color:C.textDim,marginBottom:16}}>Move this SKU out of the pending order and open it as a new Live order.</div>
-        <Btn onClick={()=>{onMoveToLive(menuFor.orderId,menuFor.sIdx,menuFor.iIdx);setMenuFor(null);setExpandSku(null);}} color="amber" sx={{width:"100%",padding:13,fontSize:14}}>↑ Open as Live Order</Btn>
+        <Btn onClick={()=>{onMoveToLive(menuFor.orderId,menuFor.sIdx,menuFor.iIdx);setMenuFor(null);setExpandKey(null);}} color="amber" sx={{width:"100%",padding:13,fontSize:14}}>↑ Open as Live Order</Btn>
       </div>
     </div>}
   </>;
 }
 // ─── PENDING ORDER TAB (staff) ───────────────────────────────
-function PendingOrderTab({orders,pendingOrders,filterOrders,onOpenOrder,onEditOrder,onReopenOrder,onItemUpdate,onMoveToLive,lang,buyerList,t}){
+function PendingOrderTab({orders,pendingOrders,filterOrders,onOpenOrder,onEditOrder,onReopenOrder,onItemUpdate,onMoveToLive,lang,buyerList,t,skuList=[],catList=[]}){
   const [view,setView]=useState("party"); // party | sku
-  const toggleSt=a=>({flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:12,fontWeight:a?600:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
   return <>
     <div style={{background:C.redBg,border:`1px solid ${C.redBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.red,marginBottom:12}}>{t.pendingOrdersInfo}</div>
-    <div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:12}}>
-      <button onClick={()=>setView("party")} style={toggleSt(view==="party")}>👤 {lang==="hi"?"पार्टी नाम":"By Party"}</button>
-      <button onClick={()=>setView("sku")} style={toggleSt(view==="sku")}>📦 {lang==="hi"?"SKU वार":"By SKU"}</button>
-    </div>
+    <Seg size="sm" value={view} onChange={setView} options={[["party","👤 "+(lang==="hi"?"पार्टी नाम":"By Party")],["sku","📦 "+(lang==="hi"?"SKU वार":"By SKU")]]}/>
     {view==="party"&&<>
-      {filterOrders(pendingOrders).length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noPendingOrders}</div>}
+      {filterOrders(pendingOrders).length===0&&<EmptyState icon="📋" title={t.noPendingOrders}/>}
       {filterOrders(pendingOrders).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}
     </>}
-    {view==="sku"&&<PendingSkuTab orders={orders} onUpdate={onItemUpdate} lang={lang} source="pending-order" onMoveToLive={onMoveToLive}/>}
+    {view==="sku"&&<PendingSkuTab orders={orders} onUpdate={onItemUpdate} lang={lang} source="pending-order" onMoveToLive={onMoveToLive} skuList={skuList} catList={catList}/>}
   </>;
 }
 
 // ─── STAFF HOME ───────────────────────────────────────────────
-function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut,onEditOrder,onReopenOrder,onItemUpdate,onMoveToLive,lang,setLang,buyerList=[]}){
+function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut,onEditOrder,onReopenOrder,onItemUpdate,onMoveToLive,lang,setLang,buyerList=[],skuList=[],catList=[]}){
   const t=T[lang];
-  const [tab,setTab]=useState("live");
+  // 3-tab IA (2026-07-03 revamp): Today = live + processed (badge), Pending = carryover, Billed.
+  // Old "Live SKUs" tab is now the By-SKU toggle inside Today; "Processed" is a group in Today.
+  const [tab,setTab]=useState("today"); // today | pending | billed
+  const [todayView,setTodayView]=useState("orders"); // orders | sku
   const [search,setSearch]=useState("");
   const live=fifo(orders.filter(o=>o.status==="live"));
   const processed=alpha(orders.filter(o=>o.status==="processed"));
   const pendingOrders=fifo(orders.filter(o=>o.status==="pending-order"));
   const billed=fifo(orders.filter(o=>o.status==="billed"&&o.date===TODAY));
-  const hist=fifo(orders.filter(o=>o.status==="historical"));
   const inProg=live.filter(o=>!isReady(o)),ready=live.filter(o=>isReady(o));
   const billedGrouped=billed.reduce((acc,o)=>{(acc[o.date]=acc[o.date]||[]).push(o);return acc;},{});
   const billedDates=Object.keys(billedGrouped).sort((a,b)=>b.localeCompare(a));
@@ -558,53 +666,51 @@ function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut,onEditOrde
     const q=search.toLowerCase();
     return list.filter(o=>o.sections.some(s=>s.name.toLowerCase().includes(q)||s.items.some(i=>i.sku.toLowerCase().includes(q))));
   };
-  const tabSt=a=>({flex:1,padding:7,borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,background:a?"#fff":"transparent",color:a?C.text:C.textDim,fontWeight:a?600:400,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
+  const navItems=[
+    {key:"today",label:t.today,icon:"🏠",count:live.length+processed.length,color:C.amber},
+    {key:"pending",label:lang==="hi"?"बाकी":"Pending",icon:"📋",count:pendingOrders.length,color:C.red},
+    {key:"billed",label:lang==="hi"?"बिल":"Billed",icon:"📄",count:billed.length,color:C.green},
+  ];
   return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg}}>
-    <div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${C.border}`,background:"#fff"}}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+    <div style={{padding:"14px 20px 12px",borderBottom:`1px solid ${C.border}`,background:"#fff"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
         <div>
           <div><span style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.amber,letterSpacing:1}}>ORDER</span><span style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.gray,letterSpacing:1}}>FLOW</span></div>
           <div style={{fontSize:11,color:C.textDim,marginTop:2}}>{live.length} {t.active} · <span style={{color:C.text,fontWeight:600}}>{staffName}</span></div>
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center"}}>
           <LangToggle lang={lang} setLang={setLang}/>
-          <button onClick={onSignOut} style={{background:"#fff",border:`1px solid ${C.borderMd}`,borderRadius:8,padding:"5px 10px",cursor:"pointer",color:C.textDim,fontSize:11,fontFamily:C.sans}}>{t.signOut}</button>
+          <button onClick={onSignOut} style={{background:"#fff",border:`1px solid ${C.borderMd}`,borderRadius:8,padding:"7px 10px",cursor:"pointer",color:C.textDim,fontSize:11,fontFamily:C.sans}}>{t.signOut}</button>
         </div>
       </div>
-      <div style={{display:"flex",gap:4,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,flexWrap:"wrap"}}>
-        <button onClick={()=>setTab("live")} style={tabSt(tab==="live")}>
-          {t.liveOrders}{live.length>0&&<span style={{background:C.amber,color:"#fff",borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:700,fontFamily:C.mono,marginLeft:4}}>{live.length}</span>}
-        </button>
-        <button onClick={()=>setTab("pending")} style={tabSt(tab==="pending")}>{lang==="hi"?"📦 SKU":"📦 Live SKUs"}</button>
-        <button onClick={()=>setTab("pending-order")} style={tabSt(tab==="pending-order")}>
-          📋 Pending{pendingOrders.length>0&&<span style={{background:C.red,color:"#fff",borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:700,fontFamily:C.mono,marginLeft:4}}>{pendingOrders.length}</span>}
-        </button>
-        <button onClick={()=>setTab("processed")} style={tabSt(tab==="processed")}>
-          Processed{processed.length>0&&<span style={{background:C.indigo,color:"#fff",borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:700,fontFamily:C.mono,marginLeft:4}}>{processed.length}</span>}
-        </button>
-        <button onClick={()=>setTab("billed")} style={tabSt(tab==="billed")}>
-          Billed{billed.length>0&&<span style={{background:C.green,color:"#fff",borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:700,fontFamily:C.mono,marginLeft:4}}>{billed.length}</span>}
-        </button>
-      </div>
     </div>
-    <div style={{flex:1,overflowY:"auto",padding:"14px 20px 40px"}}>
-      {(tab==="live"||tab==="processed"||tab==="pending-order"||tab==="billed")&&<input value={search} onChange={e=>setSearch(e.target.value)} placeholder={lang==="hi"?"नाम या SKU खोजें…":"Search by name or SKU…"} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}/>}
-      {tab==="live"&&<>
-        <Btn onClick={onNewOrder} color="amber" sx={{width:"100%",padding:13,borderRadius:10,fontSize:14,marginBottom:14,boxShadow:"0 2px 8px rgba(217,119,6,0.2)"}}>{t.newOrder}</Btn>
-        {filterOrders(inProg).length>0&&<><GrpLabel label={t.inProgress} color={C.amber}/>{filterOrders(inProg).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}</>}
-        {filterOrders(ready).length>0&&<><GrpLabel label={t.readyForBilling} color={C.green}/>{filterOrders(ready).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}</>}
-        {live.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noOrdersToday}</div>}
+    <div style={{flex:1,overflowY:"auto",padding:"14px 20px 28px"}}>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder={lang==="hi"?"नाम या SKU खोजें…":"Search by name or SKU…"} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}/>
+      {tab==="today"&&<>
+        <Btn onClick={onNewOrder} color="amber" sx={{width:"100%",padding:15,borderRadius:12,fontSize:15,minHeight:52,marginBottom:14,boxShadow:"0 2px 8px rgba(217,119,6,0.25)"}}>{t.newOrder}</Btn>
+        <Seg size="sm" value={todayView} onChange={setTodayView} options={[["orders","🗂 "+t.viewOrders],["sku",t.viewBySku]]}/>
+        {todayView==="sku"
+          ?<PendingSkuTab orders={orders} onUpdate={onItemUpdate} lang={lang} skuList={skuList} catList={catList}/>
+          :<>
+            {filterOrders(inProg).length>0&&<><GrpLabel label={t.inProgress} color={C.amber}/>{filterOrders(inProg).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}</>}
+            {filterOrders(ready).length>0&&<><GrpLabel label={t.readyForBilling} color={C.green}/>{filterOrders(ready).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}</>}
+            {filterOrders(processed).length>0&&<><GrpLabel label={t.processedAwaiting} color={C.indigo}/>{filterOrders(processed).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}</>}
+            {live.length===0&&processed.length===0&&<EmptyState icon="☀️" title={t.noOrdersToday} sub={lang==="hi"?"शुरू करने के लिए ऊपर + नया ऑर्डर दबाएं":"Tap + New Order above to get started"}/>}
+          </>}
       </>}
-      {tab==="pending"&&<PendingSkuTab orders={orders} onUpdate={onItemUpdate} lang={lang}/>}
-      {tab==="pending-order"&&<PendingOrderTab orders={orders} pendingOrders={pendingOrders} filterOrders={filterOrders} onOpenOrder={onOpenOrder} onEditOrder={onEditOrder} onReopenOrder={onReopenOrder} onItemUpdate={onItemUpdate} onMoveToLive={onMoveToLive} lang={lang} buyerList={buyerList} t={t}/>}
-      {tab==="processed"&&<>
-        {filterOrders(processed).length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noProcessedOrders}</div>}
-        {filterOrders(processed).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}
-      </>}
+      {tab==="pending"&&<PendingOrderTab orders={orders} pendingOrders={pendingOrders} filterOrders={filterOrders} onOpenOrder={onOpenOrder} onEditOrder={onEditOrder} onReopenOrder={onReopenOrder} onItemUpdate={onItemUpdate} onMoveToLive={onMoveToLive} lang={lang} buyerList={buyerList} skuList={skuList} catList={catList} t={t}/>}
       {tab==="billed"&&<>
-        {billedDates.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>{t.noPastOrders}</div>}
+        {billedDates.length===0&&<EmptyState icon="📄" title={t.noPastOrders}/>}
         {billedDates.map(d=><div key={d} style={{marginBottom:20}}><GrpLabel label={fmtDate(d)} color={C.textDim}/>{filterOrders(billedGrouped[d]).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} dim lang={lang} buyerList={buyerList}/>)}</div>)}
       </>}
+    </div>
+    {/* Bottom navigation — thumb-zone, 3 tabs, count badges */}
+    <div style={{display:"flex",borderTop:`1px solid ${C.border}`,background:"#fff",paddingBottom:"env(safe-area-inset-bottom)",flexShrink:0}}>
+      {navItems.map(n=><button key={n.key} onClick={()=>setTab(n.key)} style={{flex:1,padding:"8px 0 10px",border:"none",background:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2,fontFamily:C.sans,color:tab===n.key?C.text:C.textDim,position:"relative",minHeight:56,borderTop:tab===n.key?`2px solid ${C.amber}`:"2px solid transparent",marginTop:-1}}>
+        <span style={{fontSize:19,opacity:tab===n.key?1:0.55}}>{n.icon}</span>
+        <span style={{fontSize:11,fontWeight:tab===n.key?700:500}}>{n.label}</span>
+        {n.count>0&&<span style={{position:"absolute",top:5,left:"calc(50% + 8px)",background:n.color,color:"#fff",borderRadius:10,padding:"1px 6px",fontSize:10,fontWeight:700,fontFamily:C.mono}}>{n.count}</span>}
+      </button>)}
     </div>
   </div>;
 }
@@ -1000,7 +1106,7 @@ function CropScreen({imgSrc,onCrop,onRetake,lang="en"}){
 // ─── SCAN SCREEN ──────────────────────────────────────────────
 function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onAddAlias,lang="en",setLang}){
   const t=T[lang];
-  const [stage,setStage]=useState("choose"); // choose|crop|analysing|reviewing|manual
+  const [stage,setStage]=useState("manual"); // manual (default — manual-first entry)|choose|crop|analysing|reviewing
   const [rawImgSrc,setRawImgSrc]=useState(null);
   const [imgSrc,setImgSrc]=useState(null);
   const [imgB64,setImgB64]=useState(null);
@@ -1070,10 +1176,11 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onA
           <span style={{fontSize:30,flexShrink:0}}>🖼️</span>
           <div><div style={{fontWeight:700,fontSize:15,color:C.text,marginBottom:2}}>{t.uploadGallery}</div><div style={{fontSize:12,color:C.textDim}}>{t.uploadGallerySub}</div></div>
         </button>
-        <button onClick={()=>{setManualLines([{cat:"",sku:"",qty:1}]);setManualSection("");setManualNotes("");setStage("manual");}} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left",boxShadow:"0 1px 3px rgba(0,0,0,0.06)"}}>
+        <button onClick={()=>{setManualLines([{cat:"",sku:"",qty:1}]);setManualSection("");setManualNotes("");setStage("manual");}} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left",boxShadow:"0 1px 3px rgba(0,0,0,0.06)",marginBottom:12}}>
           <span style={{fontSize:30,flexShrink:0}}>✏️</span>
           <div><div style={{fontWeight:700,fontSize:15,color:C.text,marginBottom:2}}>{t.enterManually}</div><div style={{fontSize:12,color:C.textDim}}>{t.enterManuallySub}</div></div>
         </button>
+        <Btn onClick={()=>setStage("manual")} color="ghost" sx={{width:"100%",padding:11}}>{t.back}</Btn>
       </>}
 
       {stage==="manual"&&<>
@@ -1129,7 +1236,7 @@ function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onA
             }} color={canSubmit?"green":"ghost"} sx={{width:"100%",padding:13,fontSize:14,opacity:canSubmit?1:0.5,cursor:canSubmit?"pointer":"not-allowed"}}>
               {canSubmit?`${t.createOrders} ${t.orders} (${validLines.length})`:"Type at least one SKU"}
             </Btn>
-            <Btn onClick={()=>setStage("choose")} color="ghost" sx={{width:"100%",padding:11}}>{t.back}</Btn>
+            <Btn onClick={()=>setStage("choose")} color="ghost" sx={{width:"100%",padding:12,minHeight:46}}>{t.scanInstead}</Btn>
           </div>;
         })()}
       </>}
@@ -1363,7 +1470,7 @@ function EditOrderScreen({order,skuList,onSave,onCancel}){
 }
 
 // ─── ORDER DETAIL ─────────────────────────────────────────────
-function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,onProcess,onSendToBilling,skuList,catList,lang="en",setLang}){
+function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,onProcess,onSendToBilling,skuList,catList,lang="en",setLang,buyerList=[],partyRates={},onSetPartyRate}){
   const t=T[lang];
   const [expandedKey,setExpandedKey]=useState(null);
   const [billingOpen,setBillingOpen]=useState(false);
@@ -1375,6 +1482,15 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
   const [secName,setSecName]=useState("");
   const [editingItemSku,setEditingItemSku]=useState(null); // {sIdx,iIdx}
   const [itemSkuVal,setItemSkuVal]=useState("");
+
+  // ── Party-wise rates: edited inline in the billing modal, persisted per buyer ──
+  const [rateEdits,setRateEdits]=useState({}); // in-progress edits, keyed by sanitized SKU
+  useEffect(()=>{setRateEdits({});},[order.id]); // reset buffer when switching orders
+  const partyBuyer=buyerList.find(b=>(b.name||"").toLowerCase()===(order.sections?.[0]?.name||"").toLowerCase());
+  const partyId=partyBuyer?partyBuyer.id:null;
+  const skuKey=s=>String(s==null?"":s).replace(/[^a-zA-Z0-9]/g,"_");
+  const resolveRate=sku=>{const e=rateEdits[skuKey(sku)];if(e!==undefined&&e!=="")return Number(e)||0;return getPartyRate(partyId,sku,partyRates,skuList,catList);};
+  const commitRate=sku=>{if(partyId==null||!onSetPartyRate)return;const e=rateEdits[skuKey(sku)];if(e===undefined)return;onSetPartyRate(partyId,sku,e===""?null:Number(e));};
 
   const isBilled=order.status==="billed";
   const isProcessed=order.status==="processed";
@@ -1400,14 +1516,15 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
   // Tally export — buyer name, order id, date, voucher type columns.
   // CSV cells are quote-escaped and formula-injection-neutralised (leading =,+,-,@).
   const VOUCHER_TYPE="Sales";
+  const CGST_LEDGER="CGST@ 9%", SGST_LEDGER="SGST @ 9%"; // must match Tally ledger names exactly
   const exportTally=()=>{
     const buyer=order.sections.map(s=>s.name).join(" / ");
     const cell=v=>{let s=String(v==null?"":v);if(/^[=+\-@\t\r]/.test(s))s="'"+s;return `"${s.replace(/"/g,'""')}"`;};
-    const header=["Date","Voucher Type","Order ID","Buyer","SKU","Qty Requested","Qty Sent","Rate","Amount","Status"];
+    const header=["Date","Voucher Type","Order ID","Buyer","SKU","Qty Requested","Qty Sent","Unit","Billed Units","Rate","Taxable Value","CGST","SGST","Line Total","Status"];
     const rows=[header.map(cell).join(",")];
-    const push=(i,qtySent,rate,amt,status)=>rows.push([cell(order.date),cell(VOUCHER_TYPE),cell(order.id),cell(buyer),cell(i.sku),i.origQty,qtySent,rate,amt,cell(status)].join(","));
-    handled.filter(i=>i.status!=="unavailable").forEach(i=>{const rate=getRateForSku(i.sku,skuList,catList)||0;push(i,i.qty,rate,rate*i.qty,i.status);});
-    handled.filter(i=>i.status==="unavailable").forEach(i=>{push(i,0,0,0,"N/A");});
+    const push=(i,qtySent,L,rate,status)=>rows.push([cell(order.date),cell(VOUCHER_TYPE),cell(order.id),cell(buyer),cell(i.sku),i.origQty,qtySent,cell(L.unit),L.units,rate,L.base,L.cgst,L.sgst,L.total,cell(status)].join(","));
+    handled.filter(i=>i.status!=="unavailable").forEach(i=>{const rate=resolveRate(i.sku)||0;const L=billLine(i.sku,i.qty,rate,skuList,catList);push(i,i.qty,L,L.rate,i.status);});
+    handled.filter(i=>i.status==="unavailable").forEach(i=>{push(i,0,{unit:"",units:0,base:0,cgst:0,sgst:0,total:0},0,"N/A");});
     const blob=new Blob([rows.join("\n")],{type:"text/csv"});
     const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`order_${order.id}_tally.csv`;a.click();URL.revokeObjectURL(url);
   };
@@ -1418,17 +1535,22 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
     const buyer=order.sections.map(s=>s.name).join(" / ");
     const billItems=handled.filter(i=>i.status!=="unavailable");
     const vchDate=(order.date||"").replace(/-/g,""); // YYYYMMDD
+    let cgstTot=0,sgstTot=0;
     const lines=billItems.map(i=>{
-      const rate=getRateForSku(i.sku,skuList,catList)||0;const amt=rate*i.qty;
+      const rate=resolveRate(i.sku)||0;const L=billLine(i.sku,i.qty,rate,skuList,catList);cgstTot+=L.cgst;sgstTot+=L.sgst;
       return `          <ALLINVENTORYENTRIES.LIST>
             <STOCKITEMNAME>${esc(i.sku)}</STOCKITEMNAME>
             <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-            <ACTUALQTY>${i.qty}</ACTUALQTY>
-            <BILLEDQTY>${i.qty}</BILLEDQTY>
-            <RATE>${rate}</RATE>
-            <AMOUNT>${amt}</AMOUNT>
+            <ACTUALQTY>${L.units}</ACTUALQTY>
+            <BILLEDQTY>${L.units}</BILLEDQTY>
+            <RATE>${L.rate}</RATE>
+            <AMOUNT>${L.base}</AMOUNT>
           </ALLINVENTORYENTRIES.LIST>`;
     }).join("\n");
+    // GST ledger names must match your Tally exactly — set via CGST_LEDGER / SGST_LEDGER above.
+    const gstLines=(cgstTot+sgstTot)>0?`
+          <LEDGERENTRIES.LIST><LEDGERNAME>${esc(CGST_LEDGER)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${cgstTot.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>
+          <LEDGERENTRIES.LIST><LEDGERNAME>${esc(SGST_LEDGER)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${sgstTot.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>`:"";
     const xml=`<ENVELOPE>
   <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
   <BODY>
@@ -1442,7 +1564,7 @@ function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,
             <REFERENCE>${esc(order.id)}</REFERENCE>
             <PARTYLEDGERNAME>${esc(buyer)}</PARTYLEDGERNAME>
             <NARRATION>${esc("OrderFlow "+order.id+(order.notes?" · "+order.notes:""))}</NARRATION>
-${lines}
+${lines}${gstLines}
           </VOUCHER>
         </TALLYMESSAGE>
       </REQUESTDATA>
@@ -1515,9 +1637,9 @@ ${lines}
                     <span style={{fontFamily:C.mono,fontSize:13,color:C.textDim,fontWeight:600,flexShrink:0}}>×{item.origQty}</span>
                   </div>
                   {!isOpen&&<div style={{display:"flex",gap:7}}>
-                    <Btn onClick={()=>setStatus(sI,iI,"fulfilled")}   color="greenO" sx={{flex:1,padding:"9px 6px",fontSize:12,borderRadius:8}}>{t.fulfilled}</Btn>
-                    <Btn onClick={()=>setStatus(sI,iI,"unavailable")} color="redO"   sx={{flex:1,padding:"9px 6px",fontSize:12,borderRadius:8}}>{t.unavailable}</Btn>
-                    <Btn onClick={()=>openOverride(key,item)} color="amberO" sx={{padding:"9px 12px",fontSize:12,borderRadius:8}}>{t.qty}</Btn>
+                    <Btn onClick={()=>setStatus(sI,iI,"fulfilled")}   color="greenO" sx={{flex:1,padding:"12px 6px",fontSize:13,borderRadius:9,minHeight:44}}>{t.fulfilled}</Btn>
+                    <Btn onClick={()=>setStatus(sI,iI,"unavailable")} color="redO"   sx={{flex:1,padding:"12px 6px",fontSize:13,borderRadius:9,minHeight:44}}>{t.unavailable}</Btn>
+                    <Btn onClick={()=>openOverride(key,item)} color="amberO" sx={{padding:"12px 14px",fontSize:13,borderRadius:9,minHeight:44}}>{t.qty}</Btn>
                   </div>}
                 </div>
                 {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:14,background:C.bg}}>
@@ -1619,18 +1741,23 @@ ${lines}
         <div style={{display:"grid",gridTemplateColumns:"1fr auto auto auto",gap:"0 12px",marginBottom:4}}>
           {["SKU","Qty","Rate","Amount"].map(h=><span key={h} style={{fontSize:10,fontWeight:700,color:C.textDim,paddingBottom:6,borderBottom:`1px solid ${C.border}`}}>{h}</span>)}
           {(() => {
-            let grandTotal=0;
+            let grandTotal=0,gstC=0,gstS=0;
             const rows=handled.filter(i=>i.status!=="unavailable").map(item=>{
-              const rate=getRateForSku(item.sku,skuList,catList)||0;
-              const amt=rate*item.qty;grandTotal+=amt;
+              const k=skuKey(item.sku);
+              const globalRate=getRateForSku(item.sku,skuList,catList)||0;
+              const partySet=partyId!=null&&partyRates?.[partyId]?.skus?.[k]!=null;
+              const buf=rateEdits[k];
+              const inputVal=buf!==undefined?buf:(partySet?String(partyRates[partyId].skus[k]):"");
+              const rate=resolveRate(item.sku)||0;
+              const L=billLine(item.sku,item.qty,rate,skuList,catList);const amt=L.base;grandTotal+=amt;gstC+=L.cgst;gstS+=L.sgst;
               return <React.Fragment key={item.id}>
                 <span style={{fontFamily:C.mono,fontSize:12,color:C.text,padding:"8px 0",borderBottom:`1px solid ${C.border}`}}>{item.sku}{item.qty!==item.origQty&&<span style={{fontSize:10,color:C.textDim,marginLeft:4}}>(req ×{item.origQty})</span>}</span>
                 <span style={{fontFamily:C.mono,fontSize:12,color:C.amber,fontWeight:700,padding:"8px 0",borderBottom:`1px solid ${C.border}`,textAlign:"right"}}>×{item.qty}</span>
-                <span style={{fontFamily:C.mono,fontSize:12,color:C.textDim,padding:"8px 0",borderBottom:`1px solid ${C.border}`,textAlign:"right"}}>₹{rate>0?rate:"—"}</span>
+                <span style={{padding:"4px 0",borderBottom:`1px solid ${C.border}`,textAlign:"right"}}><input type="text" inputMode="numeric" value={inputVal} disabled={partyId==null} onChange={e=>{const v=e.target.value.replace(/[^0-9]/g,"");setRateEdits(p=>({...p,[k]:v}));}} onBlur={()=>commitRate(item.sku)} onKeyDown={e=>{if(e.key==="Enter")e.target.blur();}} placeholder={globalRate>0?String(globalRate):"—"} title={partyId==null?"Buyer unmatched — can't save a party rate":"Rate for this buyer — saved on blur"} style={{width:60,fontFamily:C.mono,fontSize:12,fontWeight:partySet||(buf!==undefined&&buf!=="")?700:400,color:partySet||(buf!==undefined&&buf!=="")?C.amber:C.text,textAlign:"right",padding:"5px 6px",border:`1px solid ${C.border}`,borderRadius:6,outline:"none",background:partyId==null?"#f5f5f5":"#fff"}}/></span>
                 <span style={{fontFamily:C.mono,fontSize:12,color:rate>0?C.text:C.textFaint,fontWeight:rate>0?700:400,padding:"8px 0",borderBottom:`1px solid ${C.border}`,textAlign:"right"}}>{rate>0?`₹${amt.toLocaleString("en-IN")}`:"—"}</span>
               </React.Fragment>;
             });
-            return <>{rows}{grandTotal>0&&<><span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:C.text,padding:"10px 0 4px",gridColumn:"1/3"}}>TOTAL</span><span/><span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.green,padding:"10px 0 4px",textAlign:"right"}}>₹{grandTotal.toLocaleString("en-IN")}</span></>}</>;
+            return <>{rows}{grandTotal>0&&<><span style={{fontFamily:C.mono,fontWeight:600,fontSize:12,color:C.textDim,padding:"10px 0 2px",gridColumn:"1/3"}}>SUBTOTAL</span><span/><span style={{fontFamily:C.mono,fontWeight:600,fontSize:12,color:C.text,padding:"10px 0 2px",textAlign:"right"}}>₹{grandTotal.toLocaleString("en-IN")}</span>{(gstC>0||gstS>0)&&<><span style={{fontFamily:C.mono,fontSize:11,color:C.textDim,padding:"2px 0",gridColumn:"1/3"}}>CGST 9%</span><span/><span style={{fontFamily:C.mono,fontSize:11,color:C.text,padding:"2px 0",textAlign:"right"}}>₹{gstC.toLocaleString("en-IN")}</span><span style={{fontFamily:C.mono,fontSize:11,color:C.textDim,padding:"2px 0",gridColumn:"1/3"}}>SGST 9%</span><span/><span style={{fontFamily:C.mono,fontSize:11,color:C.text,padding:"2px 0",textAlign:"right"}}>₹{gstS.toLocaleString("en-IN")}</span></>}<span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:C.text,padding:"6px 0 4px",gridColumn:"1/3"}}>TOTAL</span><span/><span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.green,padding:"6px 0 4px",textAlign:"right"}}>₹{(grandTotal+gstC+gstS).toLocaleString("en-IN")}</span></>}<span style={{gridColumn:"1/5",fontSize:10,color:C.textDim,paddingTop:8,lineHeight:1.45}}>{partyId!=null?<>Tap a rate to set it for <strong style={{color:C.text}}>{order.sections?.[0]?.name}</strong> — saved instantly &amp; reused next time. Blank = default rate.</>:"Buyer unmatched — rates use defaults and can't be saved to a party."}</span></>;
           })()}
         </div>
 
@@ -1802,7 +1929,7 @@ function AnalyticsTab({orders,users}){
 }
 
 // ─── ADMIN APP ────────────────────────────────────────────────
-function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onOrderProcess,onOrderSendToBilling,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange,buyerGroups,onBuyerGroupChange,onAddAlias,adminPassword,onAdminPasswordChange,onMoveToLive}){
+function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onOrderProcess,onOrderSendToBilling,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange,buyerGroups,onBuyerGroupChange,onAddAlias,adminPassword,onAdminPasswordChange,onMoveToLive,partyRates={},onSetPartyRate}){
   const [tab,setTab]=useState("orders");
   const [activeOId,setActiveOId]=useState(null);
   const [expandSku,setExpandSku]=useState(null);
@@ -1859,7 +1986,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
 
   const eSkus=skuListEnriched||skuList;
   if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setScanning(false);}} skuList={eSkus} catList={catList} buyerList={buyerList} onAddAlias={onAddAlias} lang="en"/>;
-  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} onProcess={()=>onOrderProcess(activeOrder.id)} onSendToBilling={()=>{onOrderSendToBilling(activeOrder.id);setActiveOId(null);}} skuList={eSkus} catList={catList}/>;
+  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} onProcess={()=>onOrderProcess(activeOrder.id)} onSendToBilling={()=>{onOrderSendToBilling(activeOrder.id);setActiveOId(null);}} skuList={eSkus} catList={catList} buyerList={buyerList} partyRates={partyRates} onSetPartyRate={onSetPartyRate}/>;
 
   const tabs=[["orders","📋 Orders"],["analytics","📊 Analytics"],["historical","🗂 History"],["masterdata","⚙️ Master Data"]];
   const tabSt=a=>({flex:1,padding:"8px 4px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:a?700:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
@@ -1898,7 +2025,7 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
         return <>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
             <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,flex:1}}>
-              {[[liveOrders.length,"Live Orders",C.amber,"live"],[pendingOrdersList.length,"Pending",C.red,"pending-order"],[processedOrders.length,"Processed",C.indigo,"processed"],[billedOrders.length,"Billed",C.green,"billed"]].map(([v,l,c,f])=><div key={l} onClick={()=>setOrderFilter(f)} style={tileSt(orderFilter===f,c)}>
+              {[[liveOrders.length,"Live Orders",C.amber,"live"],[pendingOrdersList.length,"Pending",C.red,"pending-order"],[processedOrders.length,"Dispatch",C.indigo,"processed"],[billedOrders.length,"Billed",C.green,"billed"]].map(([v,l,c,f])=><div key={l} onClick={()=>setOrderFilter(f)} style={tileSt(orderFilter===f,c)}>
                 <div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:c}}>{v}</div>
                 <div style={{fontSize:9,color:orderFilter===f?c:C.textDim,marginTop:1,fontWeight:orderFilter===f?700:400}}>{l}</div>
               </div>)}
@@ -1911,13 +2038,11 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
             <Btn onClick={()=>{if(window.confirm(`Delete ${bulkSelected.length} orders?`)){bulkSelected.forEach(id=>onDeleteOrder(id));setSelectedOrders(new Set());}}} color="danger" sx={{padding:"7px 12px",fontSize:12}}>🗑 Delete All</Btn>
             <Btn onClick={()=>setSelectedOrders(new Set())} color="ghost" sx={{padding:"7px 10px",fontSize:12}}>✕ Clear</Btn>
           </div>}
-          {orderFilter==="pending-order"&&<div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:12}}>
-            <button onClick={()=>setPendingView("party")} style={{flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:12,fontWeight:pendingView==="party"?600:400,background:pendingView==="party"?"#fff":"transparent",color:pendingView==="party"?C.text:C.textDim,boxShadow:pendingView==="party"?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>👤 By Party</button>
-            <button onClick={()=>setPendingView("sku")} style={{flex:1,padding:"6px 0",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:12,fontWeight:pendingView==="sku"?600:400,background:pendingView==="sku"?"#fff":"transparent",color:pendingView==="sku"?C.text:C.textDim,boxShadow:pendingView==="sku"?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>📦 By SKU</button>
-          </div>}
+          {orderFilter==="pending-order"&&<Seg size="sm" value={pendingView} onChange={setPendingView} options={[["party","👤 By Party"],["sku","📦 By SKU"]]}/>}
           {orderFilter==="pending-order"&&pendingView==="sku"
-            ?<PendingSkuTab orders={orders} onUpdate={(orderId,sIdx,iIdx,changes)=>onOrderUpdate(orderId,sIdx,iIdx,changes)} source="pending-order" onMoveToLive={onMoveToLive}/>
-            :<>{filteredOrders.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>No {orderFilter} orders.</div>}
+            ?<PendingSkuTab orders={orders} onUpdate={(orderId,sIdx,iIdx,changes)=>onOrderUpdate(orderId,sIdx,iIdx,changes)} source="pending-order" onMoveToLive={onMoveToLive} skuList={eSkus} catList={catList}/>
+            :<>{orderFilter==="processed"&&filteredOrders.length>0&&<div style={{background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.indigo,marginBottom:12}}>🚚 Ready to dispatch — open an order and Send to Billing when it goes out.</div>}
+          {filteredOrders.length===0&&<EmptyState icon={orderFilter==="live"?"☀️":orderFilter==="processed"?"🚚":orderFilter==="billed"?"📄":"📋"} title={`No ${orderFilter==="processed"?"dispatch-ready":orderFilter==="pending-order"?"pending":orderFilter} orders.`}/>}
           {filteredOrders.map(o=><div key={o.id} style={{display:"flex",alignItems:"flex-start",gap:8}}>
             <input type="checkbox" checked={selectedOrders.has(o.id)} onChange={()=>toggleOrderSelect(o.id)} style={{marginTop:18,flexShrink:0,width:16,height:16,cursor:"pointer"}}/>
             <div style={{flex:1}}><OrderCard order={o} onOpen={setActiveOId} onDelete={onDeleteOrder} onEdit={setActiveOId} onReopen={id=>onOrderReopen(id)} dim={o.status==="billed"||o.status==="processed"} buyerList={buyerList}/></div>
@@ -2300,6 +2425,56 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
 }
 
 // ─── ROOT APP ─────────────────────────────────────────────────
+// ─── OWNER APP (per-party folder rates + ledgers) ─────────────
+function OwnerApp({buyerList=[],catList=[],skuList=[],orders=[],partyRates={},onSetFolderRate,onSignOut}){
+  const [bucket,setBucket]=useState(null);
+  const [buyerId,setBuyerId]=useState(null);
+  const [search,setSearch]=useState("");
+  const [edits,setEdits]=useState({});
+  const grp=OWNER_BUCKETS.find(b=>b.id===bucket);
+  const buyer=buyerList.find(b=>b.id===buyerId);
+  const parties=grp?buyerList.filter(b=>grp.groups===null||grp.groups.includes(b.group)):[];
+  const back=()=>{if(buyerId){setBuyerId(null);setEdits({});}else if(bucket){setBucket(null);setSearch("");}else onSignOut();};
+  const folders=(buyer&&partyRates?.[buyer.id]?.folders)||{};
+  const cutoff=localDateISO(new Date(Date.now()-30*86400000));
+  const stocked=new Set();
+  if(buyer)orders.filter(o=>o.date>=cutoff).forEach(o=>o.sections?.forEach(s=>{if(s.name===buyer.name)s.items?.forEach(it=>{const sk=skuList.find(x=>x.id&&x.id.toUpperCase()===String(it.sku).toUpperCase());if(sk)stocked.add(sk.cat);});}));
+  const hdr=(title,sub)=><div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${C.border}`,background:"#fff",display:"flex",alignItems:"center",gap:12}}><button onClick={back} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20}}>←</button><div style={{flex:1}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.indigo}}>{title}</div>{sub&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>{sub}</div>}</div></div>;
+  return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg}}>
+    {!bucket&&<>{hdr("OWNER","Per-party folder rates · ledgers")}
+      <div style={{flex:1,overflowY:"auto",padding:"16px 20px",display:"flex",flexDirection:"column",gap:10}}>
+        {OWNER_BUCKETS.map(b=>{const n=buyerList.filter(x=>b.groups===null||b.groups.includes(x.group)).length;return <button key={b.id} onClick={()=>setBucket(b.id)} style={{padding:18,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,textAlign:"left",boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}><div style={{fontWeight:700,fontSize:16,color:C.text}}>{b.label}</div><div style={{fontSize:12,color:C.textDim,marginTop:3}}>{n} ledgers</div></button>;})}
+      </div></>}
+    {bucket&&!buyer&&<>{hdr(grp.label,`${parties.length} ledgers`)}
+      <div style={{flex:1,overflowY:"auto",padding:"14px 20px"}}>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search ledger…" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}/>
+        {parties.filter(b=>!search.trim()||b.name.toLowerCase().includes(search.toLowerCase())).slice(0,400).map(b=><button key={b.id} onClick={()=>setBuyerId(b.id)} style={{width:"100%",textAlign:"left",padding:"13px 14px",minHeight:48,marginBottom:6,borderRadius:10,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,fontSize:14,color:C.text,boxShadow:"0 1px 3px rgba(0,0,0,0.04)"}}>{b.name}<span style={{fontSize:11,color:C.textDim,marginLeft:8}}>{b.group}</span></button>)}
+        {parties.length===0&&<EmptyState icon="📒" title="No ledgers in this bucket"/>}
+      </div></>}
+    {buyer&&<>{hdr(buyer.name,buyer.group)}
+      <div style={{flex:1,overflowY:"auto",padding:"14px 20px 40px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:8}}>STOCKED FOLDERS · LAST 30 DAYS</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:18}}>{stocked.size===0?<span style={{fontSize:12,color:C.textFaint}}>No orders in last 30 days</span>:[...stocked].map(cid=>{const c=catList.find(x=>x.id===cid);return <span key={cid} style={{fontSize:11,padding:"4px 9px",borderRadius:12,background:C.indigoBg,color:C.indigo,fontWeight:600}}>{c?c.name:cid}</span>;})}</div>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:8}}>PER-FOLDER RATE</div>
+        {catList.map(c=>{
+          const saved=folders[c.id];const e=edits[c.id];
+          const mode=e?e.mode:(saved?.mode||"pct");
+          const val=e?e.value:(saved!=null?String(saved.value):"");
+          const base=c.rate;const v=Number(val)||0;
+          const net=base==null?null:(!v?base:Math.max(0,Math.round(mode==="flat"?base-v:base*(1-v/100))));
+          return <div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 0",borderBottom:`1px solid ${C.border}`}}>
+            <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:600,color:C.text}}>{c.name}</div><div style={{fontSize:11,color:C.textDim}}>{c.partyPriced?"set at billing":base!=null?`list ₹${base}${v?` → ₹${net}`:""}`:"—"}</div></div>
+            {!c.partyPriced&&base!=null&&<>
+              <button onClick={()=>setEdits(p=>({...p,[c.id]:{mode:mode==="pct"?"flat":"pct",value:val}}))} style={{width:30,height:30,borderRadius:6,border:`1px solid ${C.borderMd}`,background:"#fff",cursor:"pointer",fontWeight:700,color:C.indigo,fontSize:13}}>{mode==="flat"?"₹":"%"}</button>
+              <input type="text" inputMode="numeric" value={val} onChange={ev=>{const nv=ev.target.value.replace(/[^0-9.]/g,"");setEdits(p=>({...p,[c.id]:{mode,value:nv}}));}} onBlur={()=>onSetFolderRate(buyer.id,c.id,val===""?null:{mode,value:val})} onKeyDown={ev=>{if(ev.key==="Enter")ev.target.blur();}} placeholder="0" style={{width:54,fontFamily:C.mono,fontSize:13,textAlign:"right",padding:"6px 7px",border:`1px solid ${C.border}`,borderRadius:6,outline:"none",color:C.text}}/>
+            </>}
+          </div>;
+        })}
+        <div style={{fontSize:10,color:C.textDim,marginTop:12,lineHeight:1.5}}>Applies to every SKU in the folder — <strong>%</strong> off the list rate or a flat <strong>₹</strong> reduction. Saved instantly for {buyer.name}. Liner/Louver are priced at billing.</div>
+      </div></>}
+  </div>;
+}
+
 export default function App(){
   const [screen,setScreen]=useState("choose");
   const [staffId,setStaffId]=useState(null);
@@ -2310,10 +2485,12 @@ export default function App(){
   const [skuList,setSkuList]=useState([]);
   const [catList,setCatList]=useState([]);
   const [buyerList,setBuyerList]=useState([]);
+  const [partyRates,setPartyRates]=useState({});
   const [buyerGroups,setBuyerGroups]=useState([]);
   const [adminPassword,setAdminPassword]=useState("6666");
+  const [ownerPassword,setOwnerPassword]=useState("6666");
   const [loading,setLoading]=useState(true);
-  const [lang,setLang]=useState(()=>localStorage.getItem("of_lang")||"en");
+  const [lang,setLang]=useState(()=>localStorage.getItem("of_lang")||"hi"); // Hindi default — shop-floor language (Admin stays English)
   useEffect(()=>{localStorage.setItem("of_lang",lang);},[lang]);
 
   useEffect(()=>{
@@ -2373,6 +2550,9 @@ export default function App(){
       if(val){setBuyerGroups(Object.values(val));}
       else{SEED_BUYER_GROUPS.forEach(g=>dbSet(ref(db,`buyerGroups/${g.id}`),g));setBuyerGroups(SEED_BUYER_GROUPS);}
     });
+    // Party rates listener — partyRates/{buyerId}/skus/{sanitizedSku}. No seed (live-only, like orders).
+    const partyRatesRef=ref(db,"partyRates");
+    const unsubPartyRates=onValue(partyRatesRef,snap=>{setPartyRates(snap.val()||{});});
     // Admin password listener (settings/adminPassword, default 6666)
     const adminPwRef=ref(db,"settings/adminPassword");
     const unsubAdminPw=onValue(adminPwRef,snap=>{
@@ -2380,6 +2560,9 @@ export default function App(){
       if(val===null||val===undefined){dbSet(ref(db,"settings/adminPassword"),"6666");setAdminPassword("6666");}
       else{setAdminPassword(String(val));}
     });
+    // Owner password listener (settings/ownerPassword, default 6666 — separate from admin)
+    const ownerPwRef=ref(db,"settings/ownerPassword");
+    const unsubOwnerPw=onValue(ownerPwRef,snap=>{const val=snap.val();if(val===null||val===undefined){dbSet(ref(db,"settings/ownerPassword"),"6666");setOwnerPassword("6666");}else{setOwnerPassword(String(val));}});
     // Hourly purge
     const purgeInterval=setInterval(()=>{
       setOrders(prev=>{
@@ -2388,7 +2571,7 @@ export default function App(){
         return purged;
       });
     },60*60*1000);
-    return()=>{unsubOrders();unsubUsers();unsubSkus();unsubCats();unsubBuyers();unsubBuyerGroups();unsubAdminPw();clearInterval(purgeInterval);};
+    return()=>{unsubOrders();unsubUsers();unsubSkus();unsubCats();unsubBuyers();unsubBuyerGroups();unsubPartyRates();unsubAdminPw();unsubOwnerPw();clearInterval(purgeInterval);};
   },[]);
 
   const staffUser=users.find(u=>u.id===staffId);
@@ -2513,6 +2696,21 @@ export default function App(){
     if(action==="edit")dbSet(ref(db,`buyerGroups/${payload.id}`),payload);
     if(action==="delete")dbRemove(ref(db,`buyerGroups/${payload}`));
   };
+  // Party-wise rate write. Blank/null ⇒ remove (revert to default); else store absolute number.
+  const setPartyRate=(buyerId,skuCode,rate)=>{
+    if(buyerId==null||skuCode==null)return;
+    const key=String(skuCode).replace(/[^a-zA-Z0-9]/g,"_");
+    const path=`partyRates/${buyerId}/skus/${key}`;
+    if(rate==null||rate==="")dbRemove(ref(db,path));
+    else dbSet(ref(db,path),Number(rate)||0);
+  };
+  // Per-folder discount for a buyer: {mode:'pct'|'flat', value}. Null/blank ⇒ remove (revert to list rate).
+  const setFolderRate=(buyerId,folderId,disc)=>{
+    if(buyerId==null||folderId==null)return;
+    const path=`partyRates/${buyerId}/folders/${folderId}`;
+    if(!disc||disc.value===""||disc.value==null)dbRemove(ref(db,path));
+    else dbSet(ref(db,path),{mode:disc.mode==="flat"?"flat":"pct",value:Number(disc.value)||0});
+  };
 
   const addAlias=(buyer,rawText)=>{
     if(!buyer||!buyer.id||!rawText)return;
@@ -2531,14 +2729,16 @@ export default function App(){
   </div>;
 
   if(pendingAuth&&pendingAuth.type==="admin")return <PasswordGate title="ADMIN" expected={adminPassword} onSuccess={()=>{setPendingAuth(null);setScreen("admin-app");}} onBack={()=>setPendingAuth(null)}/>;
+  if(pendingAuth&&pendingAuth.type==="owner")return <PasswordGate title="OWNER" expected={ownerPassword} onSuccess={()=>{setPendingAuth(null);setScreen("owner-app");}} onBack={()=>setPendingAuth(null)}/>;
   if(pendingAuth&&pendingAuth.type==="staff")return <PasswordGate title={pendingAuth.user.name} expected={pendingAuth.user.password||"6666"} onSuccess={()=>{setStaffId(pendingAuth.user.id);setPendingAuth(null);setScreen("staff-app");}} onBack={()=>setPendingAuth(null)}/>;
-  if(screen==="choose")return <ChooseScreen onStaff={()=>setScreen("staff-select")} onAdmin={()=>setPendingAuth({type:"admin"})} lang={lang} setLang={setLang}/>;
+  if(screen==="choose")return <ChooseScreen onStaff={()=>setScreen("staff-select")} onAdmin={()=>setPendingAuth({type:"admin"})} onOwner={()=>setPendingAuth({type:"owner"})} lang={lang} setLang={setLang}/>;
   if(screen==="staff-select")return <StaffSelect users={users} onSelect={id=>{const u=users.find(x=>x.id===id);setPendingAuth({type:"staff",user:u});}} onBack={()=>setScreen("choose")} lang={lang}/>;
   if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setScreen("staff-app");}} skuList={enrichedSkuList} catList={catList} buyerList={buyerList} onAddAlias={addAlias} lang={lang} setLang={setLang}/>;
   if(screen==="staff-app"){
-    if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} onReopen={()=>reopenOrder(activeOrder.id)} onProcess={()=>processOrder(activeOrder.id)} onSendToBilling={()=>{sendTobilling(activeOrder.id);setActiveOrderId(null);}} skuList={enrichedSkuList} catList={catList} lang={lang} setLang={setLang}/>;
-    return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)} onEditOrder={id=>{setActiveOrderId(id);}} onReopenOrder={id=>reopenOrder(id)} onItemUpdate={(orderId,sIdx,iIdx,changes)=>updateItem(orderId,sIdx,iIdx,changes)} onMoveToLive={moveSkuToLive} lang={lang} setLang={setLang} buyerList={buyerList}/>;
+    if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} onReopen={()=>reopenOrder(activeOrder.id)} onProcess={()=>processOrder(activeOrder.id)} onSendToBilling={()=>{sendTobilling(activeOrder.id);setActiveOrderId(null);}} skuList={enrichedSkuList} catList={catList} lang={lang} setLang={setLang} buyerList={buyerList} partyRates={partyRates} onSetPartyRate={setPartyRate}/>;
+    return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)} onEditOrder={id=>{setActiveOrderId(id);}} onReopenOrder={id=>reopenOrder(id)} onItemUpdate={(orderId,sIdx,iIdx,changes)=>updateItem(orderId,sIdx,iIdx,changes)} onMoveToLive={moveSkuToLive} lang={lang} setLang={setLang} buyerList={buyerList} skuList={enrichedSkuList} catList={catList}/>;
   }
-  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onOrderProcess={processOrder} onOrderSendToBilling={sendTobilling} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange} buyerGroups={buyerGroups} onBuyerGroupChange={onBuyerGroupChange} onAddAlias={addAlias} adminPassword={adminPassword} onAdminPasswordChange={updateAdminPassword} onMoveToLive={moveSkuToLive}/>;
+  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onOrderProcess={processOrder} onOrderSendToBilling={sendTobilling} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange} buyerGroups={buyerGroups} onBuyerGroupChange={onBuyerGroupChange} onAddAlias={addAlias} adminPassword={adminPassword} onAdminPasswordChange={updateAdminPassword} onMoveToLive={moveSkuToLive} partyRates={partyRates} onSetPartyRate={setPartyRate}/>;
+  if(screen==="owner-app")return <OwnerApp buyerList={buyerList} catList={catList} skuList={enrichedSkuList} orders={orders} partyRates={partyRates} onSetFolderRate={setFolderRate} onSignOut={()=>setScreen("choose")}/>;
   return null;
 }
