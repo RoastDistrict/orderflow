@@ -204,32 +204,43 @@ const alpha = (arr) => [...arr].sort((a,b)=>
   (a.sections?.[0]?.name||"").localeCompare((b.sections?.[0]?.name||""),undefined,{sensitivity:"base"})
 );
 
-// Look up rate for a SKU code: SKU-level rate → category default → 0
+// List rate for a SKU: its SERIES rate (owner-editable master, at
+// category.series[sid].rate) → SKU's own baked rate → category default → 0.
 const getRateForSku = (skuCode, skuList, catList = []) => {
   const found = skuList.find((s) => s.id.toUpperCase() === skuCode.toUpperCase());
   if (!found) return 0;
-  if (found.rate != null) return found.rate; // explicit SKU rate (incl. 0) wins
   const cat = catList.find((c) => c.id === found.cat);
+  const sr = cat?.series?.[found.series]?.rate;
+  if (sr != null) return sr;                 // series list rate (owner-editable) wins
+  if (found.rate != null) return found.rate; // legacy per-SKU rate
   return cat?.rate ?? 0;
 };
 
-// Party-wise rate: a buyer-specific absolute rate (stored at
-// partyRates/{buyerId}/skus/{sanitizedSku}) wins; otherwise fall back to the
-// global SKU/category rate. buyerId null/unknown ⇒ global rate only.
+// Apply a rate mode against a list rate. abs = absolute ₹; pct = % off; flat = ₹ off.
+const applyRateMode = (mode, value, list) => {
+  const v = Number(value) || 0;
+  if (mode === "abs") return Math.max(0, Math.round(v * 100) / 100);
+  if (list == null) return list;
+  const net = mode === "flat" ? list - v : list * (1 - v / 100);
+  return Math.max(0, Math.round(net * 100) / 100);
+};
+
+// Party-wise rate. Precedence: per-SKU absolute → per-series party rate
+// (abs|pct|flat at partyRates/{b}/folders/{folder}/series/{sid}) → per-folder
+// discount (partyRates/{b}/folders/{folder}/disc) → list (series) rate.
 const getPartyRate = (buyerId, skuCode, partyRates = {}, skuList = [], catList = []) => {
   const list = getRateForSku(skuCode, skuList, catList);
-  if (buyerId != null && skuCode != null) {
-    const key = String(skuCode).replace(/[^a-zA-Z0-9]/g, "_");
-    const pr = partyRates?.[buyerId]?.skus;
-    if (pr && pr[key] != null) return pr[key];                    // per-SKU absolute override wins
-    const sku = skuList.find((s) => s.id && s.id.toUpperCase() === String(skuCode).toUpperCase());
-    const fd = sku && partyRates?.[buyerId]?.folders?.[sku.cat];  // per-folder discount (% or flat)
-    if (fd && list != null) {
-      const v = Number(fd.value) || 0;
-      const net = fd.mode === "flat" ? list - v : list * (1 - v / 100);
-      return Math.max(0, Math.round(net * 100) / 100);
-    }
-  }
+  if (buyerId == null || skuCode == null) return list;
+  const key = String(skuCode).replace(/[^a-zA-Z0-9]/g, "_");
+  const pr = partyRates?.[buyerId];
+  if (pr?.skus?.[key] != null) return pr.skus[key];                 // per-SKU absolute wins
+  const sku = skuList.find((s) => s.id && s.id.toUpperCase() === String(skuCode).toUpperCase());
+  if (!sku) return list;
+  const fnode = pr?.folders?.[sku.cat];
+  const ser = fnode?.series?.[sku.series];
+  if (ser && ser.value != null && ser.value !== "") return applyRateMode(ser.mode, ser.value, list); // per-series
+  const disc = fnode?.disc;
+  if (disc && disc.value != null && disc.value !== "") return applyRateMode(disc.mode, disc.value, list); // folder discount
   return list;
 };
 
@@ -2426,20 +2437,25 @@ function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderB
 
 // ─── ROOT APP ─────────────────────────────────────────────────
 // ─── OWNER APP (per-party folder rates + ledgers) ─────────────
-function OwnerApp({buyerList=[],catList=[],skuList=[],orders=[],partyRates={},onSetFolderRate,onSignOut}){
+function OwnerApp({buyerList=[],catList=[],skuList=[],orders=[],partyRates={},onSetFolderRate,onSetSeriesPartyRate,onSetSeriesListRate,onSignOut}){
   const [bucket,setBucket]=useState(null);
   const [buyerId,setBuyerId]=useState(null);
   const [search,setSearch]=useState("");
   const [edits,setEdits]=useState({});
+  const [folderId,setFolderId]=useState(null);
   const grp=OWNER_BUCKETS.find(b=>b.id===bucket);
   const buyer=buyerList.find(b=>b.id===buyerId);
   const parties=grp?buyerList.filter(b=>grp.groups===null||grp.groups.includes(b.group)):[];
-  const back=()=>{if(buyerId){setBuyerId(null);setEdits({});}else if(bucket){setBucket(null);setSearch("");}else onSignOut();};
+  const back=()=>{if(folderId){setFolderId(null);setEdits({});}else if(buyerId){setBuyerId(null);setFolderId(null);setEdits({});}else if(bucket){setBucket(null);setSearch("");}else onSignOut();};
   const folders=(buyer&&partyRates?.[buyer.id]?.folders)||{};
   const cutoff=localDateISO(new Date(Date.now()-30*86400000));
   const stocked=new Set();
   if(buyer)orders.filter(o=>o.date>=cutoff).forEach(o=>o.sections?.forEach(s=>{if(s.name===buyer.name)s.items?.forEach(it=>{const sk=skuList.find(x=>x.id&&x.id.toUpperCase()===String(it.sku).toUpperCase());if(sk)stocked.add(sk.cat);});}));
   const hdr=(title,sub)=><div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${C.border}`,background:"#fff",display:"flex",alignItems:"center",gap:12}}><button onClick={back} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20}}>←</button><div style={{flex:1}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.indigo}}>{title}</div>{sub&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>{sub}</div>}</div></div>;
+  const dCat=(buyer&&folderId)?catList.find(x=>x.id===folderId):null;
+  const dFnode=dCat?(folders[folderId]||{}):{};
+  const dSeries=dCat?Object.entries(dCat.series||{}):[];
+  const dDisc=dFnode.disc,dDe=edits.disc,dMode=dDe?dDe.mode:(dDisc?.mode||"pct"),dVal=dDe?dDe.value:(dDisc!=null?String(dDisc.value):"");
   return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg}}>
     {!bucket&&<>{hdr("OWNER","Per-party folder rates · ledgers")}
       <div style={{flex:1,overflowY:"auto",padding:"16px 20px",display:"flex",flexDirection:"column",gap:10}}>
@@ -2451,26 +2467,41 @@ function OwnerApp({buyerList=[],catList=[],skuList=[],orders=[],partyRates={},on
         {parties.filter(b=>!search.trim()||b.name.toLowerCase().includes(search.toLowerCase())).slice(0,400).map(b=><button key={b.id} onClick={()=>setBuyerId(b.id)} style={{width:"100%",textAlign:"left",padding:"13px 14px",minHeight:48,marginBottom:6,borderRadius:10,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,fontSize:14,color:C.text,boxShadow:"0 1px 3px rgba(0,0,0,0.04)"}}>{b.name}<span style={{fontSize:11,color:C.textDim,marginLeft:8}}>{b.group}</span></button>)}
         {parties.length===0&&<EmptyState icon="📒" title="No ledgers in this bucket"/>}
       </div></>}
-    {buyer&&<>{hdr(buyer.name,buyer.group)}
+    {buyer&&!folderId&&<>{hdr(buyer.name,buyer.group)}
       <div style={{flex:1,overflowY:"auto",padding:"14px 20px 40px"}}>
         <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:8}}>STOCKED FOLDERS · LAST 30 DAYS</div>
         <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:18}}>{stocked.size===0?<span style={{fontSize:12,color:C.textFaint}}>No orders in last 30 days</span>:[...stocked].map(cid=>{const c=catList.find(x=>x.id===cid);return <span key={cid} style={{fontSize:11,padding:"4px 9px",borderRadius:12,background:C.indigoBg,color:C.indigo,fontWeight:600}}>{c?c.name:cid}</span>;})}</div>
-        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:8}}>PER-FOLDER RATE</div>
-        {catList.map(c=>{
-          const saved=folders[c.id];const e=edits[c.id];
-          const mode=e?e.mode:(saved?.mode||"pct");
-          const val=e?e.value:(saved!=null?String(saved.value):"");
-          const base=c.rate;const v=Number(val)||0;
-          const net=base==null?null:(!v?base:Math.max(0,Math.round(mode==="flat"?base-v:base*(1-v/100))));
-          return <div key={c.id} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 0",borderBottom:`1px solid ${C.border}`}}>
-            <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:600,color:C.text}}>{c.name}</div><div style={{fontSize:11,color:C.textDim}}>{c.partyPriced?"set at billing":base!=null?`list ₹${base}${v?` → ₹${net}`:""}`:"—"}</div></div>
-            {!c.partyPriced&&base!=null&&<>
-              <button onClick={()=>setEdits(p=>({...p,[c.id]:{mode:mode==="pct"?"flat":"pct",value:val}}))} style={{width:30,height:30,borderRadius:6,border:`1px solid ${C.borderMd}`,background:"#fff",cursor:"pointer",fontWeight:700,color:C.indigo,fontSize:13}}>{mode==="flat"?"₹":"%"}</button>
-              <input type="text" inputMode="numeric" value={val} onChange={ev=>{const nv=ev.target.value.replace(/[^0-9.]/g,"");setEdits(p=>({...p,[c.id]:{mode,value:nv}}));}} onBlur={()=>onSetFolderRate(buyer.id,c.id,val===""?null:{mode,value:val})} onKeyDown={ev=>{if(ev.key==="Enter")ev.target.blur();}} placeholder="0" style={{width:54,fontFamily:C.mono,fontSize:13,textAlign:"right",padding:"6px 7px",border:`1px solid ${C.border}`,borderRadius:6,outline:"none",color:C.text}}/>
-            </>}
-          </div>;
-        })}
-        <div style={{fontSize:10,color:C.textDim,marginTop:12,lineHeight:1.5}}>Applies to every SKU in the folder — <strong>%</strong> off the list rate or a flat <strong>₹</strong> reduction. Saved instantly for {buyer.name}. Liner/Louver are priced at billing.</div>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:8}}>FOLDERS · TAP TO SET RATES</div>
+        {catList.map(c=>{const fn=folders[c.id]||{};const nS=c.series?Object.keys(c.series).length:0;const has=!!(fn.disc||(fn.series&&Object.keys(fn.series).length));
+          return <button key={c.id} onClick={()=>{setFolderId(c.id);setEdits({});}} style={{width:"100%",textAlign:"left",display:"flex",alignItems:"center",gap:10,padding:"12px 14px",minHeight:48,marginBottom:6,borderRadius:10,border:`1px solid ${has?C.indigo:C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans}}>
+            <div style={{flex:1,minWidth:0}}><div style={{fontSize:14,fontWeight:600,color:C.text}}>{c.name}</div><div style={{fontSize:11,color:C.textDim}}>{c.partyPriced?"priced at billing":`${nS} series`}{has?" · custom rate set":""}</div></div>
+            <span style={{fontSize:18,color:C.textDim}}>›</span></button>;})}
+      </div></>}
+    {buyer&&folderId&&dCat&&<>{hdr(dCat.name,`${buyer.name} · ${dCat.partyPriced?"party-priced":dSeries.length+" series"}`)}
+      <div style={{flex:1,overflowY:"auto",padding:"14px 20px 40px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:8}}>OVERALL FOLDER DISCOUNT</div>
+        <div style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0 14px",borderBottom:`1px solid ${C.border}`,marginBottom:14}}>
+          <div style={{flex:1,fontSize:11,color:C.textDim}}>Applies to every series below unless the series has its own rate</div>
+          <button onClick={()=>setEdits(p=>({...p,disc:{mode:dMode==="pct"?"flat":"pct",value:dVal}}))} style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.borderMd}`,background:"#fff",cursor:"pointer",fontWeight:700,color:C.indigo,fontSize:13}}>{dMode==="flat"?"₹":"%"}</button>
+          <input type="text" inputMode="numeric" value={dVal} onChange={ev=>{const nv=ev.target.value.replace(/[^0-9.]/g,"");setEdits(p=>({...p,disc:{mode:dMode,value:nv}}));}} onBlur={()=>onSetFolderRate(buyer.id,folderId,dVal===""?null:{mode:dMode,value:dVal})} onKeyDown={ev=>{if(ev.key==="Enter")ev.target.blur();}} placeholder="0" style={{width:54,fontFamily:C.mono,fontSize:13,textAlign:"right",padding:"7px",border:`1px solid ${C.border}`,borderRadius:6,outline:"none",color:C.text}}/>
+        </div>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:8}}>PER-SERIES — LIST ₹ · PARTY RATE</div>
+        {dSeries.length===0&&<div style={{fontSize:12,color:C.textFaint}}>No series in this folder.</div>}
+        {dSeries.map(([sid,s])=>{const pn=dFnode.series?.[sid];const pe=edits["p:"+sid];const pmode=pe?pe.mode:(pn?.mode||"abs");const pval=pe?pe.value:(pn!=null?String(pn.value):"");
+          const me=edits["m:"+sid];const mval=me!=null?me:(s.rate!=null?String(s.rate):"");const list=Number(mval)||null;const pv=Number(pval)||0;
+          const net=pval===""?null:(pmode==="abs"?pv:(list==null?null:Math.max(0,Math.round(pmode==="flat"?list-pv:list*(1-pv/100)))));
+          return <div key={sid} style={{padding:"10px 0",borderBottom:`1px solid ${C.border}`}}>
+            <div style={{fontSize:13,fontWeight:600,color:C.text,marginBottom:6}}>{s.name}{s.delta?<span style={{fontSize:11,color:C.textDim,fontWeight:400}}> · +₹{s.delta} over base</span>:null}</div>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{fontSize:11,color:C.textDim}}>list ₹</span>
+              <input type="text" inputMode="numeric" value={mval} onChange={ev=>{const nv=ev.target.value.replace(/[^0-9.]/g,"");setEdits(p=>({...p,["m:"+sid]:nv}));}} onBlur={()=>onSetSeriesListRate(folderId,sid,mval)} onKeyDown={ev=>{if(ev.key==="Enter")ev.target.blur();}} placeholder={dCat.partyPriced?"—":"0"} style={{width:60,fontFamily:C.mono,fontSize:13,textAlign:"right",padding:"6px 7px",border:`1px solid ${C.border}`,borderRadius:6,outline:"none",color:C.text}}/>
+              <span style={{flex:1}}/>
+              <button onClick={()=>setEdits(p=>({...p,["p:"+sid]:{mode:pmode==="abs"?"pct":pmode==="pct"?"flat":"abs",value:pval}}))} style={{minWidth:40,height:30,padding:"0 6px",borderRadius:6,border:`1px solid ${C.borderMd}`,background:"#fff",cursor:"pointer",fontWeight:700,color:C.indigo,fontSize:12}}>{pmode==="abs"?"₹=":pmode==="flat"?"₹-":"%"}</button>
+              <input type="text" inputMode="numeric" value={pval} onChange={ev=>{const nv=ev.target.value.replace(/[^0-9.]/g,"");setEdits(p=>({...p,["p:"+sid]:{mode:pmode,value:nv}}));}} onBlur={()=>onSetSeriesPartyRate(buyer.id,folderId,sid,pval===""?null:{mode:pmode,value:pval})} onKeyDown={ev=>{if(ev.key==="Enter")ev.target.blur();}} placeholder="party" style={{width:58,fontFamily:C.mono,fontSize:13,textAlign:"right",padding:"6px 7px",border:`1px solid ${C.border}`,borderRadius:6,outline:"none",color:C.text}}/>
+            </div>
+            {net!=null&&<div style={{fontSize:11,color:C.indigo,textAlign:"right",marginTop:3}}>party pays ₹{net}</div>}
+          </div>;})}
+        <div style={{fontSize:10,color:C.textDim,marginTop:12,lineHeight:1.5}}><strong>list ₹</strong> edits the master rate (everyone). Party toggle: <strong>₹=</strong> fixed · <strong>%</strong> off · <strong>₹-</strong> flat off. A series rate overrides the folder discount. Saved instantly for {buyer.name}.</div>
       </div></>}
   </div>;
 }
@@ -2704,12 +2735,24 @@ export default function App(){
     if(rate==null||rate==="")dbRemove(ref(db,path));
     else dbSet(ref(db,path),Number(rate)||0);
   };
-  // Per-folder discount for a buyer: {mode:'pct'|'flat', value}. Null/blank ⇒ remove (revert to list rate).
+  // Per-folder overall discount → partyRates/{b}/folders/{folder}/disc = {mode:'pct'|'flat',value}.
   const setFolderRate=(buyerId,folderId,disc)=>{
     if(buyerId==null||folderId==null)return;
-    const path=`partyRates/${buyerId}/folders/${folderId}`;
+    const path=`partyRates/${buyerId}/folders/${folderId}/disc`;
     if(!disc||disc.value===""||disc.value==null)dbRemove(ref(db,path));
     else dbSet(ref(db,path),{mode:disc.mode==="flat"?"flat":"pct",value:Number(disc.value)||0});
+  };
+  // Per-series party rate → partyRates/{b}/folders/{folder}/series/{sid} = {mode:'abs'|'pct'|'flat',value}.
+  const setSeriesPartyRate=(buyerId,folderId,seriesId,r)=>{
+    if(buyerId==null||folderId==null||seriesId==null)return;
+    const path=`partyRates/${buyerId}/folders/${folderId}/series/${seriesId}`;
+    if(!r||r.value===""||r.value==null)dbRemove(ref(db,path));
+    else dbSet(ref(db,path),{mode:["abs","flat","pct"].includes(r.mode)?r.mode:"abs",value:Number(r.value)||0});
+  };
+  // Owner-editable master list rate per series → categories/{folder}/series/{sid}/rate.
+  const setSeriesListRate=(folderId,seriesId,rate)=>{
+    if(folderId==null||seriesId==null)return;
+    dbSet(ref(db,`categories/${folderId}/series/${seriesId}/rate`),rate===""||rate==null?null:(Number(rate)||0));
   };
 
   const addAlias=(buyer,rawText)=>{
@@ -2739,6 +2782,6 @@ export default function App(){
     return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)} onEditOrder={id=>{setActiveOrderId(id);}} onReopenOrder={id=>reopenOrder(id)} onItemUpdate={(orderId,sIdx,iIdx,changes)=>updateItem(orderId,sIdx,iIdx,changes)} onMoveToLive={moveSkuToLive} lang={lang} setLang={setLang} buyerList={buyerList} skuList={enrichedSkuList} catList={catList}/>;
   }
   if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onOrderProcess={processOrder} onOrderSendToBilling={sendTobilling} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange} buyerGroups={buyerGroups} onBuyerGroupChange={onBuyerGroupChange} onAddAlias={addAlias} adminPassword={adminPassword} onAdminPasswordChange={updateAdminPassword} onMoveToLive={moveSkuToLive} partyRates={partyRates} onSetPartyRate={setPartyRate}/>;
-  if(screen==="owner-app")return <OwnerApp buyerList={buyerList} catList={catList} skuList={enrichedSkuList} orders={orders} partyRates={partyRates} onSetFolderRate={setFolderRate} onSignOut={()=>setScreen("choose")}/>;
+  if(screen==="owner-app")return <OwnerApp buyerList={buyerList} catList={catList} skuList={enrichedSkuList} orders={orders} partyRates={partyRates} onSetFolderRate={setFolderRate} onSetSeriesPartyRate={setSeriesPartyRate} onSetSeriesListRate={setSeriesListRate} onSignOut={()=>setScreen("choose")}/>;
   return null;
 }
