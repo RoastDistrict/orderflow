@@ -1,0 +1,3117 @@
+import React, { useState, useRef, useEffect } from "react";
+import { initializeApp } from "firebase/app";
+import { getDatabase, ref, set, onValue, remove, update } from "firebase/database";
+import { getAuth, signInAnonymously } from "firebase/auth";
+import skuData from "./skus.json";
+import buyerData from "./buyers.json";
+import buyerGroupData from "./buyerGroups.json";
+
+// ─── FIREBASE ─────────────────────────────────────────────────
+// PRODUCTION — orderflow-defa4. Swapped in at go-live on 2026-07-22.
+// ⚠ The orderflowv2-9ed95 TEST config is kept below, commented out, for branch testing
+// only. If you re-enable it, DO NOT push that state to main — production writes would
+// silently go to the test project (this happened once; symptom is prod skus/categories
+// never reseeding and prod orders appearing to vanish from the app).
+const firebaseConfig = {
+  apiKey:            "AIzaSyBVB_v9fYMzOs_FsdMmfyNzLqc0fP9r6XA",
+  authDomain:        "orderflow-defa4.firebaseapp.com",
+  databaseURL:       "https://orderflow-defa4-default-rtdb.firebaseio.com",
+  projectId:         "orderflow-defa4",
+  storageBucket:     "orderflow-defa4.firebasestorage.app",
+  messagingSenderId: "596338428100",
+  appId:             "1:596338428100:web:7f6af203922e459ea0e191",
+};
+// TEST project (Testing-V2 branch only):
+// const firebaseConfig = {
+//   apiKey:            "AIzaSyBfXJinzn2N7bhKbHpBsXCgJ6jyVqwRHK4",
+//   authDomain:        "orderflowv2-9ed95.firebaseapp.com",
+//   databaseURL:       "https://orderflowv2-9ed95-default-rtdb.firebaseio.com",
+//   projectId:         "orderflowv2-9ed95",
+//   storageBucket:     "orderflowv2-9ed95.firebasestorage.app",
+//   messagingSenderId: "846617594341",
+//   appId:             "1:846617594341:web:f57bcfa92f8467f058870c",
+// };
+console.info("[OrderFlow] Firebase project:", firebaseConfig.projectId);
+const fbApp = initializeApp(firebaseConfig);
+const db    = getDatabase(fbApp);
+const fbAuth = getAuth(fbApp);
+signInAnonymously(fbAuth).catch(e => console.error("Anonymous auth failed:", e));
+
+// ─── FIREBASE WRITE WRAPPERS ──────────────────────────────────
+// Surface failed writes instead of failing silently (important for billing
+// integrity + the Phase-2 Tally polling bridge). Throttle alerts to 1 / 4s.
+let _dbErrAt=0;
+const _dbErr=(op,e)=>{
+  console.error("Firebase "+op+" failed:",e);
+  const now=Date.now();
+  if(now-_dbErrAt>4000){_dbErrAt=now;try{alert("Couldn't save your change — check the connection and try again.");}catch(_){}}
+};
+const dbSet=(r,v)=>set(r,v).catch(e=>_dbErr("write",e));
+const dbRemove=(r)=>remove(r).catch(e=>_dbErr("delete",e));
+
+// ─── CONSTANTS ────────────────────────────────────────────────
+const localDateISO = (d=new Date()) => { const p=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`; };
+const TODAY          = localDateISO();
+const YDAY           = localDateISO(new Date(Date.now() - 86400000));
+const SEVEN_DAYS_AGO = localDateISO(new Date(Date.now() - 7 * 86400000));
+const nowTime = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const nowDateTime = () => {const now=new Date();return now.toLocaleDateString("en-IN",{day:"numeric",month:"short"})+" "+now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});};
+const fmtDate = (d) => d === TODAY ? "Today" : d === YDAY ? "Yesterday"
+  : new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+const cl    = (x) => JSON.parse(JSON.stringify(x));
+const genId = () => {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  return Array.from({length:5}, ()=>chars[Math.floor(Math.random()*chars.length)]).join("");
+};
+const purgeOldOrders = (orders) => orders.filter((o) => {
+  if(["live","processed","pending-order"].includes(o.status)) return true; // never purge active orders
+  if(o.status==="historical") return o.date>=YDAY; // keep only yesterday's history
+  return o.date >= SEVEN_DAYS_AGO; // billed: keep 7 days
+});
+
+// ─── MASTER DATA (imported from json files) ──────────────────
+const SKU_CATEGORIES    = skuData.categories;
+const SEED_SKUS         = skuData.skus;
+const SEED_BUYERS       = buyerData;
+const SEED_BUYER_GROUPS = buyerGroupData;
+
+// ─── SEED DATA ────────────────────────────────────────────────
+const SEED_USERS = [];
+const SEED_ORDERS = [];
+
+// ─── TRANSLATIONS ─────────────────────────────────────────────
+const T = {
+  en: {
+    tagline:"Order management · Error prevention",
+    staff:"Staff", staffSub:"Scan slips & fulfil orders",
+    admin:"Admin", adminSub:"Orders, billing & analytics",
+    signInAs:"SIGN IN AS", tapRole:"Tap a role to continue",
+    staffRoleLabel:"Staff · shop floor",
+    tabLive:"Live", tabPending:"Pending", tabProcessed:"Processed", tabBilled:"Billed",
+    fifoLabel:"FIFO · OLDEST FIRST", alphaLabel:"ALPHABETICAL",
+    liveCountSuffix:"live", processedCountSuffix:"processed", billedCountSuffix:"billed",
+    whoAreYou:"WHO ARE YOU?",
+    noStaff:"No staff added yet. Add staff in Admin → Master Data → Users.",
+    signOut:"Sign out",
+    liveOrders:"Live Orders", pendingSkus:"📦 SKUs", history:"History",
+    newOrder:"+ New Order",
+    inProgress:"In Progress", readyForBilling:"Ready for Billing",
+    noOrdersToday:"No orders yet today.", noPastOrders:"No past orders.",
+    noPendingItems:"No pending items across live orders.",
+    pendingSkusHeader:"PENDING SKUS — ACROSS ALL LIVE ORDERS",
+    pendingByCatHeader:"PENDING BY CATEGORY — FACTORY VIEW",
+    uncategorised:"Uncategorised",
+    done:"✓ Done", na:"✕ N/A",
+    pendingOrdersInfo:"Unfulfilled items from previously billed orders.",
+    noPendingOrders:"No pending orders.",
+    noProcessedOrders:"No processed orders.",
+    newOrderTitle:"NEW ORDER",
+    takePhoto:"Take a Photo", takePhotoSub:"Open camera to photograph order slip",
+    uploadGallery:"Upload from Gallery", uploadGallerySub:"Choose an existing photo",
+    enterManually:"Enter Manually", enterManuallySub:"Type SKU codes and quantities directly",
+    chooseMethod:"Choose extraction method:",
+    chooseOrder:"How would you like to add the order?",
+    free:"Free", freeSub:"Google Vision (fast OCR)",
+    premium:"Premium", premiumSub:"Claude Vision (AI understanding)",
+    back:"↩ Back", startOver:"↩ Start over",
+    cropTitle:"CROP ORDER SLIP", cropHint:"Drag corners to frame the order slip tightly", analyse:"Analyse →", retake:"↩ Retake",
+    reading:"Reading handwriting…",
+    extractionFailed:"⚠ Extraction failed",
+    adjustCrop:"✂ Adjust Crop & Retry", retakePhoto:"↩ Retake Photo",
+    itemsExtracted:"items extracted", needReview:"need review", allVerified:"All verified ✓",
+    notesCaptured:"NOTES CAPTURED FROM SLIP",
+    addMissedSku:"+ Add missed SKU to",
+    reviewWarning:"Review and edit the", uncertainItems:"uncertain item",
+    createOrders:"✓ Create", orders:"Order",
+    customerName:"CUSTOMER / SECTION NAME",
+    items:"ITEMS", addSku:"+ Add Another SKU",
+    pending:"PENDING", handled:"HANDLED",
+    allHandled:"All items handled", readyToBill:"Ready to send to billing",
+    fulfilled:"✓ Fulfilled", unavailable:"✕ N/A", qty:"Qty",
+    editSku:"Edit SKU", editQtyBtn:"Edit Qty", remove:"Remove",
+    sendToBilling:"📄 Send to Billing", billAnyway:"📄 Bill anyway",
+    itemsPending:"items pending", reopenLive:"↩ Reopen as Live Order",
+    confirmBilling:"✓ Confirm & Push to Billing", exportTally:"📊 Export to Tally (CSV)", exportTallyXml:"📦 Export to Tally (XML)", backToOrder:"Back to Order",
+    saveAlias:"+ Save alias",
+    unmatched:"UNMATCHED",
+    noMatchFound:"No match found — please enter the correct SKU.",
+    aiMatched:"AI matched at",verifyConfirm:"% — verify and confirm.",
+    addOrderNotes:"+ Add order notes", orderNotes:"ORDER NOTES", save:"Save", cancel:"Cancel",
+    active:"active",
+    customSkuWarning:"⚠ Custom SKU — not in master list. Verify or replace.",
+    confirmSku:"✓ Confirm SKU",
+    addNote:"+ Add note", removeNote:"✕ Remove note", removeSection:"🗑 Remove",
+    today:"Today", processedAwaiting:"Processed — awaiting billing",
+    scanInstead:"📷 Scan slip photo", viewOrders:"Orders", viewBySku:"📦 By SKU",
+  },
+  hi: {
+    tagline:"ऑर्डर प्रबंधन · त्रुटि निवारण",
+    staff:"स्टाफ", staffSub:"पर्ची स्कैन करें और ऑर्डर पूरा करें",
+    admin:"एडमिन", adminSub:"ऑर्डर, बिलिंग और एनालिटिक्स",
+    signInAs:"साइन इन करें", tapRole:"जारी रखने के लिए भूमिका चुनें",
+    staffRoleLabel:"स्टाफ़ · शॉप फ्लोर",
+    tabLive:"लाइव", tabPending:"बाकी", tabProcessed:"प्रोसेस्ड", tabBilled:"बिल",
+    fifoLabel:"FIFO · सबसे पुराना पहले", alphaLabel:"वर्णानुक्रम",
+    liveCountSuffix:"लाइव", processedCountSuffix:"प्रोसेस्ड", billedCountSuffix:"बिल",
+    whoAreYou:"आप कौन हैं?",
+    noStaff:"अभी कोई स्टाफ़ नहीं जोड़ा गया। एडमिन → मास्टर डेटा → यूज़र्स में स्टाफ़ जोड़ें।",
+    signOut:"साइन आउट",
+    liveOrders:"लाइव ऑर्डर", pendingSkus:"📦 बाकी SKU", history:"इतिहास",
+    newOrder:"+ नया ऑर्डर",
+    inProgress:"प्रगति में", readyForBilling:"बिलिंग के लिए तैयार",
+    noOrdersToday:"आज कोई ऑर्डर नहीं।", noPastOrders:"कोई पुराना ऑर्डर नहीं।",
+    noPendingItems:"लाइव ऑर्डर में कोई बाकी आइटम नहीं।",
+    pendingSkusHeader:"बाकी SKU — सभी लाइव ऑर्डर",
+    pendingByCatHeader:"श्रेणी अनुसार बाकी — फैक्ट्री व्यू",
+    uncategorised:"बिना श्रेणी",
+    done:"✓ हो गया", na:"✕ नहीं है",
+    pendingOrdersInfo:"पहले बिल हुए ऑर्डर के अधूरे आइटम।",
+    noPendingOrders:"कोई पेंडिंग ऑर्डर नहीं।",
+    noProcessedOrders:"कोई प्रोसेस्ड ऑर्डर नहीं।",
+    newOrderTitle:"नया ऑर्डर",
+    takePhoto:"फ़ोटो लें", takePhotoSub:"ऑर्डर स्लिप की फ़ोटो खींचें",
+    uploadGallery:"गैलरी से अपलोड करें", uploadGallerySub:"कोई मौजूदा फ़ोटो चुनें",
+    enterManually:"हाथ से दर्ज करें", enterManuallySub:"SKU कोड और मात्रा सीधे टाइप करें",
+    chooseMethod:"तरीका चुनें:",
+    chooseOrder:"ऑर्डर कैसे जोड़ना चाहते हैं?",
+    free:"मुफ़्त", freeSub:"Google Vision (तेज़ OCR)",
+    premium:"प्रीमियम", premiumSub:"Claude Vision (AI समझ)",
+    back:"↩ वापस", startOver:"↩ फिर से शुरू",
+    cropTitle:"स्लिप काटें", cropHint:"ऑर्डर स्लिप को कसकर फ्रेम करने के लिए कोने खींचें", analyse:"विश्लेषण करें →", retake:"↩ दोबारा लें",
+    reading:"हस्तलेख पढ़ रहे हैं…",
+    extractionFailed:"⚠ निष्कर्षण विफल",
+    adjustCrop:"✂ काट समायोजित करें और पुनः प्रयास करें", retakePhoto:"↩ दोबारा फ़ोटो लें",
+    itemsExtracted:"आइटम निकाले", needReview:"समीक्षा जरूरी", allVerified:"सब सत्यापित ✓",
+    notesCaptured:"स्लिप से नोट",
+    addMissedSku:"+ छूटा SKU जोड़ें",
+    reviewWarning:"समीक्षा करें", uncertainItems:"अनिश्चित आइटम",
+    createOrders:"✓ बनाएं", orders:"ऑर्डर",
+    customerName:"ग्राहक / सेक्शन नाम",
+    items:"आइटम", addSku:"+ और SKU जोड़ें",
+    pending:"बाकी", handled:"हो गया",
+    allHandled:"सभी आइटम हो गए", readyToBill:"बिलिंग के लिए तैयार",
+    fulfilled:"✓ मिल गया", unavailable:"✕ नहीं है", qty:"मात्रा",
+    editSku:"SKU बदलें", editQtyBtn:"मात्रा बदलें", remove:"हटाएं",
+    sendToBilling:"📄 बिलिंग भेजें", billAnyway:"📄 फिर भी बिल करें",
+    itemsPending:"आइटम बाकी", reopenLive:"↩ लाइव ऑर्डर में वापस लाएं",
+    confirmBilling:"✓ पुष्टि करें और बिलिंग में भेजें", exportTally:"📊 Tally CSV एक्सपोर्ट", exportTallyXml:"📦 Tally XML एक्सपोर्ट", backToOrder:"ऑर्डर पर वापस",
+    saveAlias:"+ उपनाम सहेजें",
+    unmatched:"नहीं मिला",
+    noMatchFound:"कोई मिलान नहीं — सही SKU दर्ज करें।",
+    aiMatched:"AI ने मिलाया",verifyConfirm:"% — जांचें और पुष्टि करें।",
+    addOrderNotes:"+ ऑर्डर नोट जोड़ें", orderNotes:"ऑर्डर नोट", save:"सहेजें", cancel:"रद्द करें",
+    active:"सक्रिय",
+    customSkuWarning:"⚠ Custom SKU — मास्टर लिस्ट में नहीं। जांचें या बदलें।",
+    confirmSku:"✓ SKU पुष्टि करें",
+    addNote:"+ नोट जोड़ें", removeNote:"✕ नोट हटाएं", removeSection:"🗑 हटाएं",
+    today:"आज", processedAwaiting:"प्रोसेस्ड — बिलिंग बाकी",
+    scanInstead:"📷 स्लिप फोटो स्कैन करें", viewOrders:"ऑर्डर", viewBySku:"📦 SKU वार",
+  }
+};
+
+// ─── HELPERS ──────────────────────────────────────────────────
+const allItems = (o) => o.sections.flatMap((s) => s.items);
+const isReady  = (o) => allItems(o).filter((i) => i.status === "pending").length === 0;
+const progData = (o) => {
+  const it = allItems(o), done = it.filter((i) => i.status !== "pending").length;
+  const total = it.length;
+  return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
+};
+
+const fifo = (arr) => [...arr].sort((a,b)=>{
+  if(a.createdAt&&b.createdAt) return a.createdAt-b.createdAt;
+  return (a.scannedAt||"").localeCompare(b.scannedAt||"");
+});
+// Alphabetical by buyer name (section[0].name), case-insensitive
+const alpha = (arr) => [...arr].sort((a,b)=>
+  (a.sections?.[0]?.name||"").localeCompare((b.sections?.[0]?.name||""),undefined,{sensitivity:"base"})
+);
+// elapsedStr: "12 min" / "2 h" since order.createdAt, blank if unknown (legacy orders)
+const elapsedStr = (o) => {
+  if(!o.createdAt) return "";
+  const mins = Math.max(0, Math.round((Date.now()-o.createdAt)/60000));
+  if(mins < 1) return "now";
+  if(mins < 60) return `${mins} min`;
+  return `${Math.round(mins/60)} h`;
+};
+
+// List rate for a SKU: its SERIES rate (owner-editable master, at
+// category.series[sid].rate) → SKU's own baked rate → category default → 0.
+const getRateForSku = (skuCode, skuList, catList = []) => {
+  const found = skuList.find((s) => s.id.toUpperCase() === skuCode.toUpperCase());
+  if (!found) return 0;
+  const cat = catList.find((c) => c.id === found.cat);
+  const sr = cat?.series?.[found.series]?.rate;
+  if (sr != null) return sr;                 // series list rate (owner-editable) wins
+  if (found.rate != null) return found.rate; // legacy per-SKU rate
+  return cat?.rate ?? 0;
+};
+
+// Apply a rate mode against a list rate. abs = absolute ₹; pct = % off; flat = ₹ off.
+const applyRateMode = (mode, value, list) => {
+  const v = Number(value) || 0;
+  if (mode === "abs") return Math.max(0, Math.round(v * 100) / 100);
+  if (list == null) return list;
+  const net = mode === "flat" ? list - v : list * (1 - v / 100);
+  return Math.max(0, Math.round(net * 100) / 100);
+};
+
+// Party-wise rate. Precedence: per-SKU absolute → per-series party rate
+// (abs|pct|flat at partyRates/{b}/folders/{folder}/series/{sid}) → per-folder
+// discount (partyRates/{b}/folders/{folder}/disc) → list (series) rate.
+const getPartyRate = (buyerId, skuCode, partyRates = {}, skuList = [], catList = []) => {
+  const list = getRateForSku(skuCode, skuList, catList);
+  if (buyerId == null || skuCode == null) return list;
+  const key = String(skuCode).replace(/[^a-zA-Z0-9]/g, "_");
+  const pr = partyRates?.[buyerId];
+  if (pr?.skus?.[key] != null) return pr.skus[key];                 // per-SKU absolute wins
+  const sku = skuList.find((s) => s.id && s.id.toUpperCase() === String(skuCode).toUpperCase());
+  if (!sku) return list;
+  const fnode = pr?.folders?.[sku.cat];
+  const ser = fnode?.series?.[sku.series];
+  if (ser && ser.value != null && ser.value !== "") return applyRateMode(ser.mode, ser.value, list); // per-series
+  const disc = fnode?.disc;
+  if (disc && disc.value != null && disc.value !== "") return applyRateMode(disc.mode, disc.value, list); // folder discount
+  return list;
+};
+
+// Owner buckets → buyer groups. Archit = own direct ledgers (SD); All = every group.
+const OWNER_BUCKETS = [
+  { id: "archit", label: "Archit", groups: ["SD"] },
+  { id: "dinesh", label: "Dinesh", groups: ["DIN"] },
+  { id: "vernit", label: "Vernit", groups: ["VER"] },
+  { id: "all", label: "All ledgers", groups: null },
+];
+
+// ─── BILLING LINE: UNIT CONVERSION + GST ──────────────────────
+// Resolves one billable line. Applies the folder's billing unit (WPC is priced
+// per sq ft; an 8×4 board = cat.boardSqft sq ft, so qty[boards]×boardSqft) and
+// intra-state GST (CGST+SGST). gstIncluded===false → GST added ON TOP of the
+// rate; gstIncluded===true → rate ALREADY includes GST, so it's backed out
+// (taxable = gross/1.18) and total stays = rate×units; no gstIncluded field →
+// legacy: qty as-is, no GST split. Backward-compatible with the current master.
+const billLine = (skuCode, qty, rate, skuList = [], catList = []) => {
+  const sku = skuList.find((s) => s.id && s.id.toUpperCase() === String(skuCode).toUpperCase());
+  const cat = sku ? catList.find((c) => c.id === sku.cat) : null;
+  let units = qty, eff = rate || 0, unit = (cat && cat.unit) || "per_sheet";
+  if (cat && cat.unit === "per_sqft") {            // priced per sq ft, BILLED in sq m
+    const boardSqm = cat.boardSqm || (cat.boardSqft || 32) * 0.092903;
+    units = Math.round(qty * boardSqm * 1000) / 1000;       // sq m
+    eff = Math.round((rate || 0) * 10.7639 * 100) / 100;    // ₹ per sq m (from ₹/sq ft)
+    unit = "per_sqm";
+  }
+  const gross = Math.round(eff * units * 100) / 100; // rate × units
+  const cgstP = (cat && cat.cgst) ?? 9, sgstP = (cat && cat.sgst) ?? 9;
+  let base = gross, cgst = 0, sgst = 0;
+  if (cat && cat.gstIncluded === false) {            // GST-EXCLUSIVE: add GST on top of the rate
+    cgst = Math.round(gross * cgstP) / 100;
+    sgst = Math.round(gross * sgstP) / 100;
+  } else if (cat && cat.gstIncluded === true) {      // GST-INCLUSIVE: rate already has GST — back it out
+    base = Math.round((gross / (1 + (cgstP + sgstP) / 100)) * 100) / 100; // taxable value
+    cgst = Math.round(base * cgstP) / 100;
+    sgst = Math.round(base * sgstP) / 100;
+  }                                                  // else (no gstIncluded field): legacy, no GST split
+  return { units, unit, rate: eff, base, cgst, sgst, total: Math.round((base + cgst + sgst) * 100) / 100 };
+};
+
+// ─── FUZZY SKU MATCHER ────────────────────────────────────────
+// ─── SKU MATCHER ──────────────────────────────────────────────
+// Splits a SKU string into its alpha prefix and numeric body.
+// e.g. "HC 7813"  → { prefix:"HC",  num:"7813" }
+//      "FL2 1406" → { prefix:"FL2", num:"1406" }
+//      "MFF F37"  → { prefix:"MFF", num:"F37"  }
+//      "72-129"   → { prefix:"72",  num:"129"  }  (numeric prefix ok)
+const splitSku = (s) => {
+  const clean = s.toUpperCase().replace(/[^A-Z0-9]/g, " ").trim();
+  // Has explicit space: prefix is everything before first space, num is rest
+  const m = clean.match(/^([A-Z0-9]{1,6})\s+(.+)$/);
+  if (m) return { prefix: m[1], num: m[2].replace(/\s+/g,"") };
+  // No space — split alpha prefix from numeric body
+  const m2 = clean.match(/^([A-Z]+)(\d.*)$/);
+  if (m2) return { prefix: m2[1], num: m2[2] };
+  // Numeric-led (e.g. "72F64" with no space) — treat whole thing as num, prefix=""
+  // This case shouldn't normally occur after the space-normalisation above
+  return { prefix: clean, num: "" };
+};
+
+// Levenshtein distance (for numeric part comparison)
+const levenshtein = (a, b) => {
+  const m = a.length, n = b.length;
+  const dp = Array.from({length:m+1}, (_,i) => Array.from({length:n+1}, (_,j) => i===0?j:j===0?i:0));
+  for (let i=1;i<=m;i++) for (let j=1;j<=n;j++)
+    dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+  return dp[m][n];
+};
+
+const fuzzyMatchSku = (raw, skuList) => {
+  const clean = raw.toUpperCase().trim();
+  const {prefix:rawPfx, num:rawNum} = splitSku(clean);
+
+  // First check exact alias match across all SKUs
+  for (const sku of skuList) {
+    if ((sku.aliases||[]).some(a=>a.toUpperCase()===clean)) return {matched:sku.id, confidence:100};
+  }
+
+  // Exact bare-code match. MICA master ids carry a thickness suffix (e.g. "HG 81112 .92MM");
+  // sku.code holds the bare matchable code ("HG 81112"). Falls back to id when code is absent,
+  // so this is a no-op for legacy data where code is undefined.
+  const codeOf = (s) => (s.code || s.id || "").toUpperCase().trim();
+  const codeHits = skuList.filter((s) => codeOf(s) === clean);
+  if (codeHits.length === 1) return { matched: codeHits[0].id, confidence: 100 };
+  if (codeHits.length > 1) return { matched: codeHits[0].id, confidence: 90 }; // same code, different thickness/folder → review
+
+  let best = null, bestScore = 0;
+
+  for (const sku of skuList) {
+    const {prefix:skuPfx, num:skuNum} = splitSku(codeOf(sku));
+
+    // ── Rule 1: prefix MUST match exactly (HC≠FC, HG≠HGG allowed with penalty)
+    if (rawPfx !== skuPfx) {
+      // Allow 1-char OCR error in prefix only if lengths are equal
+      if (rawPfx.length !== skuPfx.length) continue;
+      if (levenshtein(rawPfx, skuPfx) > 1) continue;
+    }
+
+    // ── Rule 2: score numeric part similarity
+    const rawN = rawNum.replace(/[^A-Z0-9]/g,"");
+    const skuN = skuNum.replace(/[^A-Z0-9]/g,"");
+    if (!rawN || !skuN) continue;
+
+    let score = 0;
+    if (rawN === skuN) {
+      score = rawPfx===skuPfx ? 1.0 : 0.95; // exact num, exact/near prefix
+    } else if (rawN.startsWith(skuN) || skuN.startsWith(rawN)) {
+      score = 0.88;
+    } else if (rawN.includes(skuN) || skuN.includes(rawN)) {
+      score = 0.82;
+    } else {
+      // Levenshtein on numeric part — allow up to 2 char differences
+      const dist = levenshtein(rawN, skuN);
+      const maxLen = Math.max(rawN.length, skuN.length);
+      if (dist > 2) continue; // too different
+      score = (1 - dist / maxLen) * (rawPfx===skuPfx ? 0.9 : 0.8);
+    }
+
+    if (score > bestScore) { bestScore = score; best = sku.id; }
+  }
+
+  // Only return a match if score is meaningful
+  if (bestScore >= 0.80) {
+    return { matched: best, confidence: Math.round(bestScore * 100) };
+  }
+  // No good match — return raw OCR text as custom SKU
+  return { matched: clean, confidence: 0 };
+};
+
+// ─── DESIGN TOKENS ────────────────────────────────────────────
+const C = {
+  bg:"#F7F8FA", surface:"#FFFFFF", card:"#FFFFFF",
+  border:"#E4E7ED", borderMd:"#D1D5DB",
+  amber:"#D97706", amberBg:"#FFFBEB", amberBd:"#FCD34D",
+  green:"#059669", greenBg:"#ECFDF5", greenBd:"#6EE7B7",
+  red:"#DC2626",   redBg:"#FEF2F2",   redBd:"#FCA5A5",
+  blue:"#2563EB",  blueBg:"#EFF6FF",  blueBd:"#93C5FD",
+  indigo:"#7C3AED",indigoBg:"#F5F3FF",indigoBd:"#C4B5FD",
+  gray:"#6B7280",  grayBg:"#F9FAFB",
+  text:"#111827",  textDim:"#6B7280", textFaint:"#D1D5DB",
+  mono:"'JetBrains Mono','Fira Mono',monospace",
+  sans:"'Inter',system-ui,sans-serif",
+};
+
+// ─── SMALL COMPONENTS ─────────────────────────────────────────
+function Pill({ status, small=false }) {
+  const m={fulfilled:{l:"Fulfilled",c:C.green,bg:C.greenBg,bd:C.greenBd},unavailable:{l:"N/A",c:C.red,bg:C.redBg,bd:C.redBd},partial:{l:"Partial",c:C.amber,bg:C.amberBg,bd:C.amberBd},pending:{l:"Pending",c:C.gray,bg:C.grayBg,bd:C.border},billed:{l:"Billed",c:C.blue,bg:C.blueBg,bd:C.blueBd},processed:{l:"Processed",c:C.indigo,bg:C.indigoBg,bd:C.indigoBd}};
+  const s=m[status]||m.pending;
+  return <span style={{fontFamily:C.mono,fontSize:small?9:10,fontWeight:600,padding:small?"2px 6px":"3px 8px",borderRadius:4,background:s.bg,color:s.c,border:`1px solid ${s.bd}`,whiteSpace:"nowrap"}}>{s.l}</span>;
+}
+function PBar({pct,ready}){return <div style={{background:C.border,borderRadius:4,height:5,overflow:"hidden"}}><div style={{width:`${pct}%`,height:"100%",borderRadius:4,background:ready?C.green:C.amber,transition:"width .3s"}}/></div>;}
+function Btn({children,onClick,color="amber",sx={}}){
+  const colors={amber:{bg:C.amber,text:"#fff",border:C.amber},green:{bg:C.green,text:"#fff",border:C.green},ghost:{bg:"#fff",text:C.gray,border:C.border},danger:{bg:C.redBg,text:C.red,border:C.redBd},greenO:{bg:C.greenBg,text:C.green,border:C.greenBd},redO:{bg:C.redBg,text:C.red,border:C.redBd},amberO:{bg:C.amberBg,text:C.amber,border:C.amberBd}};
+  const v=colors[color]||colors.amber;
+  return <button onClick={onClick} style={{background:v.bg,color:v.text,border:`1px solid ${v.border}`,fontFamily:C.sans,fontWeight:600,fontSize:13,borderRadius:8,padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:5,...sx}}>{children}</button>;
+}
+function GrpLabel({label,color}){return <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,marginTop:4}}><div style={{width:6,height:6,borderRadius:3,background:color,flexShrink:0}}/><span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,letterSpacing:"1px",color:C.textDim}}>{label.toUpperCase()}</span></div>;}
+
+// ─── UI PRIMITIVES (2026-07-03 UI revamp) ─────────────────────
+// EmptyState: friendly empty placeholder with icon + optional hint.
+function EmptyState({icon="📭",title,sub}){
+  return <div style={{textAlign:"center",padding:"52px 20px"}}>
+    <div style={{fontSize:34,marginBottom:10,opacity:0.85}}>{icon}</div>
+    <div style={{fontSize:14,fontWeight:600,color:C.textDim}}>{title}</div>
+    {sub&&<div style={{fontSize:12,color:C.textFaint,marginTop:4}}>{sub}</div>}
+  </div>;
+}
+// Seg: shared segmented control (replaces the per-screen toggle style copies).
+// options = [[key,label],...]. size "sm" for dense in-content toggles.
+function Seg({options,value,onChange,size="md"}){
+  const st=a=>({flex:1,padding:size==="sm"?"7px 0":"10px 0",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:size==="sm"?12:13,fontWeight:a?700:500,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none",minHeight:size==="sm"?34:42});
+  return <div style={{display:"flex",gap:3,background:C.bg,borderRadius:9,padding:3,border:`1px solid ${C.border}`,marginBottom:12}}>
+    {options.map(([k,l])=><button key={k} onClick={()=>onChange(k)} style={st(value===k)}>{l}</button>)}
+  </div>;
+}
+
+function OrderCard({order,onOpen,onDelete,onEdit,onReopen,dim=false,lang="en",buyerList=[]}){
+  const {done,total,pct}=progData(order);
+  const ready=isReady(order),billed=order.status==="billed",processed=order.status==="processed";
+  const firstName=order.sections[0]?.name||"";
+  // If Hindi mode, show hindiName if buyer has one
+  const buyerObj=buyerList.find(b=>b.name===firstName);
+  const displayName=(lang==="hi"&&buyerObj?.hindiName)?buyerObj.hindiName:firstName;
+  const names=order.sections.map(s=>{const b=buyerList.find(x=>x.name===s.name);return(lang==="hi"&&b?.hindiName)?b.hindiName:s.name;}).join(", ");
+  const initials=(()=>{const words=displayName.trim().split(/\s+/).filter(Boolean);if(words.length===0)return"?";if(words.length===1)return words[0].slice(0,2).toUpperCase();return(words[0][0]+words[1][0]).toUpperCase();})();
+  const hasPartialOrNA=allItems(order).some(i=>i.status==="partial"||i.status==="unavailable");
+const idBg=billed?C.grayBg:processed?(hasPartialOrNA?C.amberBg:C.grayBg):ready?C.greenBg:C.amberBg;
+const idC=billed?C.gray:processed?(hasPartialOrNA?C.amber:C.gray):ready?C.green:C.amber;
+const idBd=billed?C.border:processed?(hasPartialOrNA?C.amberBd:C.border):ready?C.greenBd:C.amberBd;
+  const [menuOpen,setMenuOpen]=useState(false);
+  const pressTimer=useRef(null);
+
+  const startPress=e=>{
+    e.preventDefault();
+    pressTimer.current=setTimeout(()=>setMenuOpen(true),500);
+  };
+  const endPress=e=>{
+    clearTimeout(pressTimer.current);
+  };
+
+  return <div style={{position:"relative",marginBottom:10}}>
+    {menuOpen&&<div onClick={()=>setMenuOpen(false)} style={{position:"fixed",inset:0,zIndex:50}}/>}
+    {menuOpen&&<div style={{position:"absolute",top:0,right:0,zIndex:100,background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 4px 20px rgba(0,0,0,0.15)",minWidth:180,overflow:"hidden"}}>
+      {onEdit&&<button onClick={()=>{setMenuOpen(false);onEdit(order.id);}} style={{width:"100%",padding:"13px 16px",border:"none",borderBottom:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:13,fontFamily:C.sans,fontWeight:600,color:C.text,textAlign:"left",display:"flex",alignItems:"center",gap:10}}>✏️ Edit Order</button>}
+      {(billed||processed||order.status==="pending-order")&&onReopen&&<button onClick={()=>{setMenuOpen(false);onReopen(order.id);}} style={{width:"100%",padding:"13px 16px",border:"none",borderBottom:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:13,fontFamily:C.sans,fontWeight:600,color:C.amber,textAlign:"left",display:"flex",alignItems:"center",gap:10}}>↩ Reopen as Live</button>}
+      {onDelete&&<button onClick={()=>{setMenuOpen(false);if(window.confirm(`Delete order ${order.id}?`))onDelete(order.id);}} style={{width:"100%",padding:"13px 16px",border:"none",background:"#fff",cursor:"pointer",fontSize:13,fontFamily:C.sans,fontWeight:600,color:C.red,textAlign:"left",display:"flex",alignItems:"center",gap:10}}>🗑 Delete Order</button>}
+    </div>}
+    <div
+      style={{background:C.card,border:`1px solid ${ready&&!billed?C.greenBd:C.border}`,borderRadius:12,padding:"14px 16px",opacity:dim?0.65:1,boxShadow:"0 1px 3px rgba(0,0,0,0.05)",userSelect:"none",WebkitUserSelect:"none",WebkitTouchCallout:"none"}}
+      onMouseDown={startPress} onMouseUp={endPress} onMouseLeave={endPress}
+      onTouchStart={startPress} onTouchEnd={endPress} onTouchCancel={endPress}
+      onContextMenu={e=>e.preventDefault()}
+    >
+      <div onClick={()=>{if(!menuOpen)onOpen(order.id);}} style={{cursor:"pointer"}}>
+        <div style={{display:"flex",alignItems:"flex-start",gap:12,marginBottom:10}}>
+          <div style={{width:42,height:42,borderRadius:8,flexShrink:0,background:idBg,border:`1px solid ${idBd}`,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:C.mono,fontWeight:700,fontSize:15,color:idC}}>{initials}</div>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:8}}>
+              <div style={{fontSize:13,fontWeight:600,color:C.text,lineHeight:1.4}}>{names}</div>
+              <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+                <Pill status={billed?"billed":processed?"processed":ready?"fulfilled":"pending"}/>
+                {(onEdit||onDelete||onReopen)&&<button onClick={e=>{e.stopPropagation();setMenuOpen(true);}} aria-label="Order actions" style={{width:28,height:28,borderRadius:7,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:16,lineHeight:1,padding:0}}>⋯</button>}
+              </div>
+            </div>
+            <div style={{fontSize:11,color:C.textDim,marginTop:3}}>{fmtDate(order.date)} · {order.scannedAt} · {total} items</div>
+          </div>
+        </div>
+        <PBar pct={pct} ready={ready}/>
+        <div style={{fontSize:11,color:C.textDim,marginTop:5}}>{done}/{total} handled</div>
+      </div>
+    </div>
+  </div>;
+}
+
+// ─── ORDER CARD 2 (redesign, Figma "02 · Staff Home") ─────────
+// Used in the redesigned StaffHome Live/Processed/Billed lists. Reuses the
+// existing progData/isReady/allItems helpers + the shared <Pill/> component
+// (its colour tokens already match the Figma spec exactly). Distinct from
+// <OrderCard/> so the still-unredesigned Admin views keep their current look.
+function OrderCard2({order,pillStatus,onOpen,onDelete,onEdit,onReopen,lang="en",buyerList=[],skuList=[]}){
+  const {done,total,pct}=progData(order);
+  const firstName=order.sections[0]?.name||"";
+  const buyerObj=buyerList.find(b=>b.name===firstName);
+  const displayName=(lang==="hi"&&buyerObj?.hindiName)?buyerObj.hindiName:firstName;
+  const groupCode=buyerObj?.group||"";
+  const items=allItems(order);
+  const first=items[0];
+  const firstSkuObj=first?skuList.find(s=>s.id&&s.id.toUpperCase()===String(first.sku).toUpperCase()):null;
+  const skuLine=first?`${first.sku}${firstSkuObj?._catName?" · "+firstSkuObj._catName:""}${items.length>1?" · +"+(items.length-1):""}`:"";
+  const barColor=pillStatus==="billed"?C.blue:pillStatus==="processed"?C.indigo:pillStatus==="fulfilled"?C.green:pillStatus==="partial"?C.amber:C.textFaint;
+  const numColor=pillStatus==="billed"?C.blue:pillStatus==="processed"?C.indigo:pillStatus==="fulfilled"?C.green:pillStatus==="partial"?C.amber:C.textDim;
+  const elapsed=elapsedStr(order);
+  const [menuOpen,setMenuOpen]=useState(false);
+  const pressTimer=useRef(null);
+  const startPress=e=>{e.preventDefault();pressTimer.current=setTimeout(()=>setMenuOpen(true),500);};
+  const endPress=()=>clearTimeout(pressTimer.current);
+
+  return <div style={{position:"relative"}}>
+    {menuOpen&&<div onClick={()=>setMenuOpen(false)} style={{position:"fixed",inset:0,zIndex:50}}/>}
+    {menuOpen&&<div style={{position:"absolute",top:0,right:0,zIndex:100,background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 4px 20px rgba(0,0,0,0.15)",minWidth:180,overflow:"hidden"}}>
+      {onEdit&&<button onClick={()=>{setMenuOpen(false);onEdit(order.id);}} style={{width:"100%",padding:"13px 16px",border:"none",borderBottom:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:13,fontFamily:C.sans,fontWeight:600,color:C.text,textAlign:"left"}}>✏️ Edit Order</button>}
+      {onReopen&&order.status!=="live"&&<button onClick={()=>{setMenuOpen(false);onReopen(order.id);}} style={{width:"100%",padding:"13px 16px",border:"none",borderBottom:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:13,fontFamily:C.sans,fontWeight:600,color:C.amber,textAlign:"left"}}>↩ Reopen as Live</button>}
+      {onDelete&&<button onClick={()=>{setMenuOpen(false);if(window.confirm(`Delete order ${order.id}?`))onDelete(order.id);}} style={{width:"100%",padding:"13px 16px",border:"none",background:"#fff",cursor:"pointer",fontSize:13,fontFamily:C.sans,fontWeight:600,color:C.red,textAlign:"left"}}>🗑 Delete Order</button>}
+    </div>}
+    <div onClick={()=>{if(!menuOpen)onOpen(order.id);}}
+      onMouseDown={startPress} onMouseUp={endPress} onMouseLeave={endPress}
+      onTouchStart={startPress} onTouchEnd={endPress} onTouchCancel={endPress}
+      onContextMenu={e=>e.preventDefault()}
+      style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"13px 14px",cursor:"pointer",userSelect:"none",WebkitUserSelect:"none",WebkitTouchCallout:"none"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:9}}>
+        <div style={{fontSize:14,fontWeight:600,color:C.text,flexShrink:0}}>{displayName}</div>
+        {groupCode&&<span style={{fontSize:10,fontWeight:500,fontFamily:C.mono,padding:"3px 7px",borderRadius:6,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,color:C.indigo,flexShrink:0}}>{groupCode}</span>}
+        <div style={{flex:1}}/>
+        <Pill status={pillStatus}/>
+      </div>
+      {skuLine&&<div style={{fontSize:11,color:C.textDim,marginBottom:9}}>{skuLine}</div>}
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{flex:1,height:6,borderRadius:3,background:C.border,overflow:"hidden"}}>
+          <div style={{width:`${pct}%`,height:"100%",borderRadius:3,background:barColor}}/>
+        </div>
+        <div style={{fontFamily:C.mono,fontSize:11,fontWeight:500,color:numColor,flexShrink:0}}>{done} / {total}</div>
+        {elapsed&&<div style={{fontFamily:C.mono,fontSize:10,color:C.textFaint,flexShrink:0}}>· {elapsed}</div>}
+      </div>
+    </div>
+  </div>;
+}
+
+// ─── LANG TOGGLE ──────────────────────────────────────────────
+function LangToggle({lang,setLang}){
+  return <button onClick={()=>setLang(l=>l==="en"?"hi":"en")}
+    style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:12,fontFamily:C.sans,fontWeight:600,color:C.textDim,display:"flex",alignItems:"center",gap:5}}>
+    {lang==="en"?"🇮🇳 हिंदी":"🇬🇧 English"}
+  </button>;
+}
+
+// ─── LANG PILL (segmented, redesign) ──────────────────────────
+function LangPill({lang,setLang}){
+  const seg=(k,label,fontFamily)=>{
+    const active=lang===k;
+    return <button onClick={()=>setLang(k)} style={{padding:"5px 11px",borderRadius:999,border:"none",cursor:"pointer",fontFamily:fontFamily||C.sans,fontSize:k==="en"?11:12,fontWeight:active?600:400,background:active?C.indigo:"transparent",color:active?"#fff":C.textDim}}>{label}</button>;
+  };
+  return <div style={{display:"flex",gap:2,padding:4,borderRadius:999,border:`1px solid ${C.border}`,background:"#fff"}}>
+    {seg("en","EN")}
+    {seg("hi","हिन्दी","'Noto Sans Devanagari',sans-serif")}
+  </div>;
+}
+
+// ─── ROLE ICONS (redesign) ────────────────────────────────────
+function IconCamera({size=22,color=C.indigo}){
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+    <circle cx="12" cy="13" r="4"/>
+  </svg>;
+}
+function IconGrid({size=22,color=C.indigo}){
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>
+  </svg>;
+}
+function IconSearch({size=22,color=C.indigo}){
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+  </svg>;
+}
+function IconLogout({size=18,color=C.textDim}){
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+  </svg>;
+}
+
+// ─── CHOOSE SCREEN (no PIN) — Figma "01 · Role Picker" ────────
+function ChooseScreen({onStaff,onAdmin,onOwner,lang,setLang}){
+  const t=T[lang];
+  const roles=[
+    {icon:<IconCamera/>, title:t.staff, sub:t.staffSub, onClick:onStaff},
+    {icon:<IconGrid/>, title:t.admin, sub:t.adminSub, onClick:onAdmin},
+    {icon:<IconSearch/>, title:"Client rates", sub:"Party rates & folders", onClick:onOwner},
+  ];
+  return <div style={{minHeight:620,background:C.bg,display:"flex",flexDirection:"column",alignItems:"center"}}>
+    <div style={{width:"100%",maxWidth:390,display:"flex",flexDirection:"column",flex:1}}>
+      <div style={{background:"#fff",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"18px 20px"}}>
+        <div>
+          <div style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.indigo,letterSpacing:0.3}}>OrderFlow</div>
+          <div style={{fontSize:11,color:C.textDim,marginTop:2}}>{t.tagline}</div>
+        </div>
+        <LangPill lang={lang} setLang={setLang}/>
+      </div>
+      <div style={{padding:"30px 20px 0"}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.textDim,letterSpacing:"0.5px",marginBottom:12}}>{t.signInAs}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+          {roles.map((r,i)=>
+            <button key={i} onClick={r.onClick} style={{display:"flex",alignItems:"center",gap:14,width:"100%",padding:16,borderRadius:14,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",textAlign:"left",boxShadow:"0 1px 4px rgba(0,0,0,0.06)"}}>
+              <div style={{width:46,height:46,borderRadius:12,background:C.indigoBg,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{r.icon}</div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontFamily:C.sans,fontWeight:600,fontSize:14,color:C.text}}>{r.title}</div>
+                <div style={{fontFamily:C.sans,fontSize:11,color:C.textDim,marginTop:2}}>{r.sub}</div>
+              </div>
+              <div style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.textFaint,flexShrink:0}}>›</div>
+            </button>
+          )}
+        </div>
+      </div>
+      <div style={{marginTop:"auto",textAlign:"center",padding:"60px 20px 26px",fontSize:11,color:C.textFaint}}>{t.tapRole}</div>
+    </div>
+  </div>;
+}
+
+// ─── STAFF SELECT (no PIN) ────────────────────────────────────
+function StaffSelect({users,onSelect,onBack,lang}){
+  const t=T[lang];
+  const active=users.filter(u=>u.active);
+  return <div style={{minHeight:620,background:"#fff",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:32,position:"relative"}}>
+    <button onClick={onBack} style={{position:"absolute",top:16,left:16,background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:4}}>←</button>
+    <div style={{fontSize:13,fontWeight:600,color:C.textDim,marginBottom:20,letterSpacing:"0.5px"}}>{t.whoAreYou}</div>
+    {active.length===0
+      ? <div style={{width:"100%",maxWidth:320,padding:"18px 16px",borderRadius:12,border:`1px dashed ${C.borderMd}`,background:C.grayBg,textAlign:"center",fontSize:12,color:C.textDim,lineHeight:1.7}}>{t.noStaff}</div>
+      : <div style={{width:"100%",maxWidth:320,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        {active.map(u=><button key={u.id} onClick={()=>onSelect(u.id)} style={{padding:16,minHeight:56,borderRadius:12,cursor:"pointer",background:"#fff",border:`1px solid ${C.borderMd}`,color:C.text,fontWeight:600,fontSize:15,fontFamily:C.sans,boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>{u.name}</button>)}
+      </div>}
+  </div>;
+}
+
+// ─── ADMIN PASSWORD CARD (master data) ────────────────────────
+function AdminPasswordCard({adminPassword,onAdminPasswordChange}){
+  const [editing,setEditing]=useState(false);
+  const [val,setVal]=useState("");
+  return <div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      <div>
+        <div style={{fontSize:11,fontWeight:700,color:C.amber,letterSpacing:"0.5px"}}>🔐 ADMIN PASSWORD</div>
+        <div style={{fontSize:11,color:C.textDim,marginTop:3}}>Used to enter the Admin area</div>
+      </div>
+      {!editing&&<Btn onClick={()=>{setVal(adminPassword);setEditing(true);}} color="ghost" sx={{padding:"5px 10px",fontSize:11}}>Change</Btn>}
+    </div>
+    {editing&&<div style={{marginTop:12}}>
+      <input value={val} onChange={e=>setVal(e.target.value)} placeholder="New admin password" style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,letterSpacing:2,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:8}}/>
+      <div style={{display:"flex",gap:8}}>
+        <Btn onClick={()=>{if(!val.trim()){alert("Password cannot be empty.");return;}onAdminPasswordChange(val.trim());setEditing(false);}} color="green" sx={{flex:1,padding:10,fontSize:13}}>Save</Btn>
+        <Btn onClick={()=>setEditing(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+      </div>
+    </div>}
+  </div>;
+}
+
+// ─── PASSWORD GATE ────────────────────────────────────────────
+function PasswordGate({title,expected,onSuccess,onBack}){
+  const [val,setVal]=useState("");
+  const [err,setErr]=useState(false);
+  const submit=()=>{
+    if(val===String(expected)){onSuccess();}
+    else{setErr(true);setVal("");}
+  };
+  return <div style={{minHeight:620,background:"#fff",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:32,position:"relative"}}>
+    <button onClick={onBack} style={{position:"absolute",top:16,left:16,background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:4}}>←</button>
+    <div style={{fontSize:13,fontWeight:600,color:C.textDim,marginBottom:6,letterSpacing:"0.5px"}}>{title}</div>
+    <div style={{fontSize:12,color:C.textFaint,marginBottom:20}}>Enter password</div>
+    <input
+      type="password" inputMode="numeric" value={val} autoComplete="off"
+      onChange={e=>{setVal(e.target.value);setErr(false);}}
+      onKeyDown={e=>{if(e.key==="Enter")submit();}}
+      placeholder="••••"
+      style={{width:"100%",maxWidth:240,padding:"12px 14px",borderRadius:10,border:`1px solid ${err?C.redBd:C.borderMd}`,fontSize:18,fontFamily:C.mono,letterSpacing:4,textAlign:"center",outline:"none",color:C.text,background:err?C.redBg:"#fff",boxSizing:"border-box"}}/>
+    {err&&<div style={{fontSize:12,color:C.red,marginTop:10}}>Incorrect password</div>}
+    <button onClick={submit} style={{width:"100%",maxWidth:240,marginTop:16,padding:14,minHeight:48,borderRadius:12,border:"none",background:C.amber,color:"#fff",fontWeight:700,fontSize:14,fontFamily:C.sans,cursor:"pointer",boxShadow:"0 2px 8px rgba(217,119,6,0.25)"}}>Continue →</button>
+  </div>;
+}
+
+function PendingSkuTab({orders,onUpdate,lang="en",source="live",onMoveToLive,skuList=[],catList=[]}){
+  const t=T[lang];
+  const [expandKey,setExpandKey]=useState(null);
+  const [groupBy,setGroupBy]=useState("sku"); // sku | cat
+  const [menuFor,setMenuFor]=useState(null); // {orderId,sIdx,iIdx,buyer}
+  const pressTimer=useRef(null);
+  const canMove=!!onMoveToLive;
+  const canCat=skuList.length>0;
+  const mode=canCat?groupBy:"sku";
+  const startPress=(occ)=>{if(!canMove)return;pressTimer.current=setTimeout(()=>setMenuFor({orderId:occ.orderId,sIdx:occ.sIdx,iIdx:occ.iIdx,buyer:occ.buyer}),500);};
+  const cancelPress=()=>{if(pressTimer.current){clearTimeout(pressTimer.current);pressTimer.current=null;}};
+  const catNameOf=(skuCode)=>{const s=skuList.find(x=>x.id&&x.id.toUpperCase()===String(skuCode).toUpperCase());if(!s)return t.uncategorised;const c=catList.find(c=>c.id===s.cat);return c?.name||s._catName||t.uncategorised;};
+  const liveOrders=orders.filter(o=>o.status===source);
+  const groupMap={};
+  liveOrders.forEach(order=>{
+    order.sections.forEach((sec,sIdx)=>{
+      sec.items.forEach((item,iIdx)=>{
+        if(item.status!=="pending")return;
+        const key=mode==="cat"?catNameOf(item.sku):item.sku;
+        if(!groupMap[key])groupMap[key]={key,totalQty:0,orders:[],skuSet:{}};
+        groupMap[key].totalQty+=item.origQty;
+        groupMap[key].skuSet[item.sku]=(groupMap[key].skuSet[item.sku]||0)+item.origQty;
+        groupMap[key].orders.push({orderId:order.id,buyer:sec.name,qty:item.origQty,sku:item.sku,sIdx,iIdx,orderRef:order});
+      });
+    });
+  });
+  const rows=Object.values(groupMap).sort((a,b)=>b.totalQty-a.totalQty);
+
+  return <>
+    {canCat&&<Seg size="sm" value={mode} onChange={k=>{setGroupBy(k);setExpandKey(null);}} options={[["sku","📦 "+(lang==="hi"?"SKU वार":"By SKU")],["cat","🏭 "+(lang==="hi"?"श्रेणी वार":"By Category")]]}/>}
+    {rows.length===0
+      ?<EmptyState icon="📦" title={t.noPendingItems}/>
+      :<>
+    <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:12}}>{mode==="cat"?t.pendingByCatHeader:t.pendingSkusHeader}</div>
+    {rows.map(row=>{
+      const isExp=expandKey===row.key;
+      const allFulfilled=row.orders.every(o=>o.orderRef.sections[o.sIdx].items[o.iIdx].status!=="pending");
+      const skuCount=Object.keys(row.skuSet).length;
+      return <div key={row.key} style={{background:"#fff",border:`1px solid ${isExp?C.amberBd:C.border}`,borderRadius:12,marginBottom:10,overflow:"hidden",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>
+        <div onClick={()=>setExpandKey(isExp?null:row.key)} style={{padding:"14px 16px",cursor:"pointer",display:"flex",alignItems:"center",gap:12}}>
+          <div style={{flex:1}}>
+            <div style={{fontFamily:mode==="cat"?C.sans:C.mono,fontWeight:700,fontSize:14,color:allFulfilled?C.green:C.text}}>{row.key}</div>
+            <div style={{fontSize:11,color:C.textDim,marginTop:3}}>{mode==="cat"?`${skuCount} SKU${skuCount>1?"s":""} · `:""}{row.orders.length} order{row.orders.length>1?"s":""}</div>
+          </div>
+          <div style={{fontFamily:C.mono,fontWeight:700,fontSize:18,color:allFulfilled?C.green:C.amber}}>×{row.totalQty}</div>
+          <span style={{color:C.textDim,fontSize:13}}>{isExp?"▲":"▼"}</span>
+        </div>
+        {isExp&&<div style={{borderTop:`1px solid ${C.border}`,background:C.bg}}>
+          {row.orders.map((occ,i)=>{
+            const liveItem=occ.orderRef.sections[occ.sIdx].items[occ.iIdx];
+            const isPending=liveItem.status==="pending";
+            return <div key={i} style={{padding:"12px 16px",borderBottom:i<row.orders.length-1?`1px solid ${C.border}`:"none",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+              <div
+                onMouseDown={()=>isPending&&startPress(occ)} onMouseUp={cancelPress} onMouseLeave={cancelPress}
+                onTouchStart={()=>isPending&&startPress(occ)} onTouchEnd={cancelPress} onTouchCancel={cancelPress}
+                style={{flex:1,cursor:canMove&&isPending?"pointer":"default",userSelect:"none",WebkitUserSelect:"none"}}>
+                <div style={{fontSize:13,fontWeight:600,color:C.text}}>{occ.buyer}{canMove&&isPending&&<span style={{fontSize:9,color:C.textFaint,marginLeft:6,fontWeight:400}}>⟶ hold to move</span>}</div>
+                <div style={{fontFamily:C.mono,fontSize:11,color:C.textDim,marginTop:2}}>{mode==="cat"?occ.sku+" · ":""}{occ.orderId} · ×{occ.qty}</div>
+              </div>
+              {isPending
+                ?<div style={{display:"flex",gap:6}}>
+                    <Btn onClick={()=>onUpdate(occ.orderId,occ.sIdx,occ.iIdx,{status:"fulfilled",handledBy:"Staff"})} color="greenO" sx={{padding:"6px 10px",fontSize:11}}>{t.done}</Btn>
+                    <Btn onClick={()=>onUpdate(occ.orderId,occ.sIdx,occ.iIdx,{status:"unavailable",handledBy:"Staff"})} color="redO" sx={{padding:"6px 10px",fontSize:11}}>{t.na}</Btn>
+                  </div>
+                :<Pill status={liveItem.status}/>
+              }
+            </div>;
+          })}
+        </div>}
+      </div>;
+    })}
+      </>}
+    {menuFor&&<div onClick={e=>{if(e.target===e.currentTarget)setMenuFor(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 28px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+          <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>{menuFor.buyer}</span>
+          <button onClick={()=>setMenuFor(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+        </div>
+        <div style={{fontSize:12,color:C.textDim,marginBottom:16}}>Move this SKU out of the pending order and open it as a new Live order.</div>
+        <Btn onClick={()=>{onMoveToLive(menuFor.orderId,menuFor.sIdx,menuFor.iIdx);setMenuFor(null);setExpandKey(null);}} color="amber" sx={{width:"100%",padding:13,fontSize:14}}>↑ Open as Live Order</Btn>
+      </div>
+    </div>}
+  </>;
+}
+// ─── PENDING ORDER TAB (staff) ───────────────────────────────
+function PendingOrderTab({orders,pendingOrders,filterOrders,onOpenOrder,onEditOrder,onReopenOrder,onItemUpdate,onMoveToLive,lang,buyerList,t,skuList=[],catList=[]}){
+  const [view,setView]=useState("party"); // party | sku
+  return <>
+    <div style={{background:C.redBg,border:`1px solid ${C.redBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.red,marginBottom:12}}>{t.pendingOrdersInfo}</div>
+    <Seg size="sm" value={view} onChange={setView} options={[["party","👤 "+(lang==="hi"?"पार्टी नाम":"By Party")],["sku","📦 "+(lang==="hi"?"SKU वार":"By SKU")]]}/>
+    {view==="party"&&<>
+      {filterOrders(pendingOrders).length===0&&<EmptyState icon="📋" title={t.noPendingOrders}/>}
+      {filterOrders(pendingOrders).map(o=><OrderCard key={o.id} order={o} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList}/>)}
+    </>}
+    {view==="sku"&&<PendingSkuTab orders={orders} onUpdate={onItemUpdate} lang={lang} source="pending-order" onMoveToLive={onMoveToLive} skuList={skuList} catList={catList}/>}
+  </>;
+}
+
+// ─── STAFF HOME ───────────────────────────────────────────────
+function StaffHome({orders,staffName,onNewOrder,onOpenOrder,onSignOut,onEditOrder,onReopenOrder,onItemUpdate,onMoveToLive,lang,setLang,buyerList=[],skuList=[],catList=[]}){
+  const t=T[lang];
+  // Top segmented tabs (2026-07-22 redesign, Figma "02 · Staff Home"): replaces the
+  // 2026-07-03 bottom-nav 3-tab IA. Live/Pending/Processed match the approved frame;
+  // Billed is a 4th segment added on Archit's call so staff don't lose that view
+  // (the Figma frame itself doesn't show a Billed tab).
+  const [tab,setTab]=useState("live"); // live | pending | processed | billed
+  const [liveView,setLiveView]=useState("orders"); // orders | sku
+  const [search,setSearch]=useState("");
+  const live=fifo(orders.filter(o=>o.status==="live"));
+  const processed=alpha(orders.filter(o=>o.status==="processed")); // invariant: Processed sorts alphabetically, not FIFO
+  const pendingOrders=fifo(orders.filter(o=>o.status==="pending-order"));
+  const billed=fifo(orders.filter(o=>o.status==="billed"&&o.date===TODAY));
+  const billedGrouped=billed.reduce((acc,o)=>{(acc[o.date]=acc[o.date]||[]).push(o);return acc;},{});
+  const billedDates=Object.keys(billedGrouped).sort((a,b)=>b.localeCompare(a));
+  const filterOrders=(list)=>{
+    if(!search.trim())return list;
+    const q=search.toLowerCase();
+    return list.filter(o=>o.sections.some(s=>s.name.toLowerCase().includes(q)||s.items.some(i=>i.sku.toLowerCase().includes(q))));
+  };
+  const tabs=[
+    {key:"live",label:t.tabLive,count:live.length},
+    {key:"pending",label:t.tabPending,count:pendingOrders.length},
+    {key:"processed",label:t.tabProcessed,count:processed.length},
+    {key:"billed",label:t.tabBilled,count:billed.length},
+  ];
+  const initial=(staffName||"?").trim().charAt(0).toUpperCase();
+  return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg}}>
+    <div style={{padding:"18px 20px 12px",background:"#fff"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <div style={{width:34,height:34,borderRadius:999,background:C.indigo,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+          <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:"#fff"}}>{initial}</span>
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:14,fontWeight:600,color:C.text}}>{staffName}</div>
+          <div style={{fontSize:11,color:C.textDim}}>{t.staffRoleLabel}</div>
+        </div>
+        <LangPill lang={lang} setLang={setLang}/>
+        <button onClick={onSignOut} aria-label={t.signOut} title={t.signOut} style={{background:"none",border:"none",cursor:"pointer",padding:6,display:"flex",flexShrink:0}}><IconLogout/></button>
+      </div>
+    </div>
+    <div style={{padding:"0 20px 12px",background:"#fff"}}>
+      <div style={{display:"flex",gap:2,background:C.bg,borderRadius:10,padding:4,border:`1px solid ${C.border}`}}>
+        {tabs.map(tb=>{
+          const active=tab===tb.key;
+          return <button key={tb.key} onClick={()=>setTab(tb.key)} style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:6,padding:"8px 4px",borderRadius:8,border:"none",cursor:"pointer",background:active?"#fff":"transparent",fontFamily:C.sans,fontSize:13,fontWeight:600,color:active?C.indigo:C.textDim}}>
+            {tb.label}
+            <span style={{fontFamily:C.mono,fontSize:10,fontWeight:500,padding:"3px 7px",borderRadius:6,background:active?C.indigoBg:C.bg,border:`1px solid ${active?C.indigoBd:C.border}`,color:active?C.indigo:C.textDim}}>{tb.count}</span>
+          </button>;
+        })}
+      </div>
+    </div>
+    <div style={{height:1,background:C.border,flexShrink:0}}/>
+    <div style={{flex:1,overflowY:"auto",padding:"14px 20px 28px"}}>
+      <input value={search} onChange={e=>setSearch(e.target.value)} placeholder={lang==="hi"?"नाम या SKU खोजें…":"Search by name or SKU…"} style={{width:"100%",padding:"11px 12px",borderRadius:10,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}/>
+      {tab==="live"&&<>
+        <Seg size="sm" value={liveView} onChange={setLiveView} options={[["orders","🗂 "+t.viewOrders],["sku",t.viewBySku]]}/>
+        {liveView==="sku"
+          ?<PendingSkuTab orders={orders} onUpdate={onItemUpdate} lang={lang} skuList={skuList} catList={catList}/>
+          :<>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+              <span style={{fontFamily:C.mono,fontSize:11,fontWeight:600,color:C.textDim,letterSpacing:"0.5px"}}>{t.fifoLabel}</span>
+              <span style={{fontFamily:C.mono,fontSize:10,color:C.textDim}}>{live.length} {t.liveCountSuffix}</span>
+            </div>
+            {filterOrders(live).length===0&&<EmptyState icon="☀️" title={t.noOrdersToday} sub={lang==="hi"?"शुरू करने के लिए नीचे + नया ऑर्डर दबाएं":"Tap + New Order below to get started"}/>}
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {filterOrders(live).map(o=>{
+                const {done,total}=progData(o);
+                const pillStatus=total===0?"pending":done===total?"fulfilled":done===0?"pending":"partial";
+                return <OrderCard2 key={o.id} order={o} pillStatus={pillStatus} onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList} skuList={skuList}/>;
+              })}
+            </div>
+          </>}
+      </>}
+      {tab==="pending"&&<PendingOrderTab orders={orders} pendingOrders={pendingOrders} filterOrders={filterOrders} onOpenOrder={onOpenOrder} onEditOrder={onEditOrder} onReopenOrder={onReopenOrder} onItemUpdate={onItemUpdate} onMoveToLive={onMoveToLive} lang={lang} buyerList={buyerList} skuList={skuList} catList={catList} t={t}/>}
+      {tab==="processed"&&<>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+          <span style={{fontFamily:C.mono,fontSize:11,fontWeight:600,color:C.textDim,letterSpacing:"0.5px"}}>{t.alphaLabel}</span>
+          <span style={{fontFamily:C.mono,fontSize:10,color:C.textDim}}>{processed.length} {t.processedCountSuffix}</span>
+        </div>
+        {filterOrders(processed).length===0&&<EmptyState icon="🗂" title={t.noProcessedOrders}/>}
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {filterOrders(processed).map(o=><OrderCard2 key={o.id} order={o} pillStatus="processed" onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList} skuList={skuList}/>)}
+        </div>
+      </>}
+      {tab==="billed"&&<>
+        {billedDates.length===0&&<EmptyState icon="📄" title={t.noPastOrders}/>}
+        {billedDates.map(d=><div key={d} style={{marginBottom:20}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+            <span style={{fontFamily:C.mono,fontSize:11,fontWeight:600,color:C.textDim,letterSpacing:"0.5px"}}>{fmtDate(d).toUpperCase()}</span>
+            <span style={{fontFamily:C.mono,fontSize:10,color:C.textDim}}>{billedGrouped[d].length} {t.billedCountSuffix}</span>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {filterOrders(billedGrouped[d]).map(o=><OrderCard2 key={o.id} order={o} pillStatus="billed" onOpen={onOpenOrder} onEdit={onEditOrder} onReopen={onReopenOrder} lang={lang} buyerList={buyerList} skuList={skuList}/>)}
+          </div>
+        </div>)}
+      </>}
+    </div>
+    {/* Sticky bottom New Order button — Figma spec: purple, bilingual caption shown together always */}
+    <div style={{padding:"12px 20px 26px",background:"#fff",flexShrink:0}}>
+      <button onClick={onNewOrder} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:9,padding:"15px 0",borderRadius:12,border:"none",cursor:"pointer",background:C.indigo,boxShadow:"0 2px 8px rgba(124,58,237,0.25)"}}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <span style={{fontFamily:C.sans,fontWeight:600,fontSize:14,color:"#fff"}}>New Order</span>
+        <span style={{fontFamily:"'Noto Sans Devanagari',sans-serif",fontSize:12,color:"#C4B5FD"}}>नया ऑर्डर</span>
+      </button>
+    </div>
+  </div>;
+}
+
+// ─── CLAUDE VISION ────────────────────────────────────────────
+async function extractOrderFromImage(base64Image,skuList,_mode,buyerList=[],catList=[]){
+  const res=await fetch("/api/claude-vision",{method:"POST",headers:{"Content-Type":"application/json"},body: JSON.stringify({
+  image: base64Image,
+  buyers: buyerList.map(b=>({name:b.name,aliases:b.aliases||[]})),
+  skus: skuList.map(s=>s.id),
+  catList: catList.map(c=>c.name)
+})});
+  const data=await res.json();
+  if(!res.ok)throw new Error(data.error||"Claude extraction failed");
+  return parseClaudeExtraction(data,skuList,buyerList);
+}
+function parseClaudeExtraction(claudeData,skuList,buyerList){
+  const sections=[];
+  if(!claudeData.orders||!Array.isArray(claudeData.orders))return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
+  for(const order of claudeData.orders){
+    const rawBuyerStr=(order._raw||order.buyer||"").trim();
+
+    // Match buyer: exact name, then aliases, then case-insensitive name
+    let buyerMatch=null;
+    let matchedViaAlias=false;
+    const normalise=s=>(s||"").trim().toUpperCase();
+
+    // 1. Exact name match
+    buyerMatch=buyerList.find(b=>normalise(b.name)===normalise(order.buyer));
+    if(!buyerMatch){
+      // 2. Alias match (catches Hindi aliases saved from previous scans)
+      for(const b of buyerList){
+        if((b.aliases||[]).some(a=>normalise(a)===normalise(order.buyer)||normalise(a)===normalise(rawBuyerStr))||
+           (b.hindiName&&(normalise(b.hindiName)===normalise(order.buyer)||normalise(b.hindiName)===normalise(rawBuyerStr)))){
+          buyerMatch=b;matchedViaAlias=true;break;
+        }
+      }
+    }
+
+    const sectionName=buyerMatch?.name||order.buyer||"Unknown Buyer";
+    // _raw: preserve original OCR text for alias saving
+    const rawBuyer=rawBuyerStr||(!buyerMatch&&order.buyer?order.buyer:null);
+    // If matched via alias we know it's correct; otherwise use Claude's confidence
+    const buyerConfidence=matchedViaAlias?100:(buyerMatch?Math.max(order.confidence||0,95):order.confidence||0);
+
+    // * marker anywhere in the order (buyer name, raw, notes, or any item) → ★ Priority note
+    const hasStar=/\*/.test(rawBuyerStr)||/\*/.test(order.buyer||"")||/\*/.test(order.notes||"")||
+      (order.starred===true)||
+      (Array.isArray(order.items)&&order.items.some(i=>/\*/.test(i._raw||"")||/\*/.test(i.sku||"")));
+    let notes=(order.notes||"").replace(/\*/g,"").trim()||null;
+    if(hasStar){const star="★ Priority";notes=notes?star+" · "+notes:star;}
+
+    const section={name:sectionName,items:[],_raw:rawBuyer,_confidence:buyerConfidence,notes};
+    if(order.items&&Array.isArray(order.items)){
+      for(const item of order.items){
+        // * marker on an item → treat as a note on the section, not an SKU
+        if(item._raw&&/^\s*\*\s*$/.test(item._raw))continue;
+        const rawSku=(item.sku||item._raw||"").trim();
+        if(!rawSku)continue;
+        // Always fuzzy-match against SKU master — catches Claude OCR errors (H4→HG, OR→CR etc.)
+        const {matched,confidence:matchConf}=skuList.length>0
+          ?fuzzyMatchSku(rawSku,skuList)
+          :{matched:rawSku,confidence:0};
+        const isCustom=matchConf===0;
+        // If fuzzy found nothing, fall back to Claude's raw text as custom
+        const finalSku=isCustom?rawSku.toUpperCase():matched;
+        const finalConf=isCustom?0:matchConf;
+        // Custom SKUs are NOT auto-confirmed — staff must verify them
+        section.items.push({
+          sku:finalSku,qty:parseInt(item.qty)||1,
+          confidence:finalConf,skipped:false,confirmed:finalConf>=95,
+          custom:isCustom,_raw:rawSku
+        });
+      }
+    }
+    if(section.items.length>0)sections.push(section);
+  }
+  if(sections.length===0)return{sections:[{name:"Unrecognised",items:[]}],parseError:true};
+  return{sections,notes:"",parseError:false};
+}
+// ─── SKU TYPEAHEAD ────────────────────────────────────────────
+// Shared typeahead input used in manual entry + order SKU editing
+function SkuTypeahead({value,onChange,onSelect,onBlur,skuList,placeholder,autoFocus,style={}}){
+  const [open,setOpen]=useState(false);
+  const [query,setQuery]=useState(value||"");
+  const wrapRef=useRef();
+
+  // Sync query when value changes from outside (e.g. edit opens with existing sku)
+  useEffect(()=>{setQuery(value||"");},[value]);
+
+  // Normalize: strip all spaces for loose matching (SAP8113 matches SAP 8113)
+  const normQ=query.replace(/\s+/g,"").toUpperCase();
+  const suggestions=query.trim().length>0
+    ?skuList.filter(s=>{
+        const qRaw=query.toUpperCase();
+        const idUp=s.id.toUpperCase();
+        const idNorm=idUp.replace(/\s+/g,"");
+        const nameUp=(s.name||"").toUpperCase();
+        return idUp.includes(qRaw)||idNorm.includes(normQ)||nameUp.includes(qRaw)||(s._catName||"").toUpperCase().includes(qRaw);
+      }).sort((a,b)=>{
+        // Exact match or starts-with first
+        const aN=a.id.replace(/\s+/g,"").toUpperCase();
+        const bN=b.id.replace(/\s+/g,"").toUpperCase();
+        const aStarts=aN.startsWith(normQ)?0:1;
+        const bStarts=bN.startsWith(normQ)?0:1;
+        return aStarts-bStarts;
+      }).slice(0,8)
+    :[];
+
+  const isCustom=query.trim().length>0&&!skuList.find(s=>s.id.replace(/\s+/g,"").toUpperCase()===normQ||s.id.toUpperCase()===query.trim().toUpperCase());
+  const exactMatch=skuList.find(s=>s.id.replace(/\s+/g,"").toUpperCase()===normQ||s.id.toUpperCase()===query.trim().toUpperCase());
+
+  const handleChange=e=>{
+    setQuery(e.target.value);
+    onChange(e.target.value);
+    setOpen(true);
+  };
+  const handleSelect=sku=>{
+    setQuery(sku.id);
+    onSelect(sku.id,false,sku.cat);
+    setOpen(false);
+  };
+  const handleBlur=e=>{
+    // Small delay so click on suggestion registers first
+    setTimeout(()=>{
+      setOpen(false);
+      if(onBlur)onBlur(query.trim(),isCustom&&!exactMatch);
+    },150);
+  };
+  const handleKeyDown=e=>{
+    if(e.key==="Enter"){
+      e.preventDefault();
+      if(suggestions.length>0&&!exactMatch)handleSelect(suggestions[0]);
+      else{onSelect(query.trim(),isCustom&&!exactMatch,null);setOpen(false);}
+    }
+    if(e.key==="Escape")setOpen(false);
+  };
+
+  const borderColor=isCustom?C.indigo:query&&exactMatch?C.green:query?C.amber:C.border;
+
+  return <div ref={wrapRef} style={{position:"relative",flex:1,...style}}>
+    <div style={{position:"relative"}}>
+      <input
+        value={query}
+        onChange={handleChange}
+        onFocus={()=>setOpen(true)}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        autoFocus={autoFocus}
+        placeholder={placeholder||"Type SKU code…"}
+        autoCapitalize="characters"
+        autoComplete="off"
+        spellCheck={false}
+        style={{width:"100%",padding:"9px 12px",paddingRight:isCustom?88:query&&exactMatch?72:12,borderRadius:8,border:`1.5px solid ${borderColor}`,fontFamily:C.mono,fontSize:13,color:isCustom?C.indigo:C.text,fontWeight:isCustom?600:400,background:"#fff",outline:"none",boxSizing:"border-box",transition:"border-color .15s"}}
+      />
+      {isCustom&&<span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontFamily:C.mono,fontSize:9,fontWeight:700,color:C.indigo,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:4,padding:"2px 5px",whiteSpace:"nowrap",pointerEvents:"none"}}>CUSTOM</span>}
+      {!isCustom&&query&&exactMatch&&<span style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",fontFamily:C.mono,fontSize:9,fontWeight:700,color:C.green,background:C.greenBg,border:`1px solid ${C.greenBd}`,borderRadius:4,padding:"2px 5px",pointerEvents:"none"}}>✓</span>}
+    </div>
+    {open&&suggestions.length>0&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,boxShadow:"0 4px 16px rgba(0,0,0,0.12)",zIndex:999,maxHeight:240,overflowY:"auto"}}>
+      {suggestions.map(sku=>{
+        const catObj=sku._catName;
+        return <div key={sku.id} onMouseDown={e=>{e.preventDefault();handleSelect(sku);}}
+          style={{padding:"10px 14px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}
+          onMouseEnter={e=>e.currentTarget.style.background=C.amberBg}
+          onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+          <span style={{fontFamily:C.mono,fontWeight:600,fontSize:13,color:C.text}}>{sku.id}</span>
+          {sku._catName&&<span style={{fontFamily:C.sans,fontSize:10,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",flexShrink:0}}>{sku._catName}</span>}
+        </div>;
+      })}
+      {query.trim()&&<div onMouseDown={e=>{e.preventDefault();onSelect(query.trim().toUpperCase(),true,null);setOpen(false);setQuery(query.trim().toUpperCase());}}
+        style={{padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:8}}
+        onMouseEnter={e=>e.currentTarget.style.background=C.indigoBg}
+        onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+        <span style={{fontFamily:C.mono,fontSize:12,color:C.indigo,fontWeight:600}}>+ Use "{query.trim().toUpperCase()}" as custom SKU</span>
+        <span style={{fontFamily:C.mono,fontSize:9,color:C.indigo,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:4,padding:"2px 5px",marginLeft:"auto"}}>CUSTOM</span>
+      </div>}
+    </div>}
+    {open&&query.trim().length>0&&suggestions.length===0&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,background:"#fff",border:`1px solid ${C.indigoBd}`,borderRadius:10,boxShadow:"0 4px 16px rgba(0,0,0,0.12)",zIndex:999}}>
+      <div onMouseDown={e=>{e.preventDefault();onSelect(query.trim().toUpperCase(),true,null);setOpen(false);}}
+        style={{padding:"12px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:8}}
+        onMouseEnter={e=>e.currentTarget.style.background=C.indigoBg}
+        onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+        <span style={{fontFamily:C.mono,fontSize:12,color:C.indigo,fontWeight:600}}>+ Add "{query.trim().toUpperCase()}" as custom SKU</span>
+        <span style={{fontFamily:C.mono,fontSize:9,color:"#fff",background:C.indigo,borderRadius:4,padding:"2px 6px",marginLeft:"auto"}}>NEW</span>
+      </div>
+    </div>}
+  </div>;
+}
+
+// ─── BUYER TYPEAHEAD ──────────────────────────────────────────
+function BuyerTypeahead({value,onChange,onSelect,placeholder,autoFocus,style={},buyerList=[]}){
+  const [open,setOpen]=useState(false);
+  const [query,setQuery]=useState(value||"");
+  const wrapRef=useRef();
+  useEffect(()=>{setQuery(value||"");},[value]);
+  const normQ=query.replace(/\s+/g,"").toUpperCase();
+  const sourceList=buyerList.length>0?buyerList:SEED_BUYERS;
+  const suggestions=query.trim().length>0
+    ?sourceList.filter(b=>{
+        const n=b.name.toUpperCase();
+        const aliases=(b.aliases||[]).map(a=>a.toUpperCase());
+        const hindi=(b.hindiName||"").toUpperCase();
+        return n.includes(query.toUpperCase())||n.replace(/\s+/g,"").includes(normQ)||aliases.some(a=>a.includes(query.toUpperCase()))||hindi.includes(query.toUpperCase());
+      }).slice(0,8)
+    :[];
+  const handleChange=e=>{setQuery(e.target.value);onChange&&onChange(e.target.value);setOpen(true);};
+  const handleSelect=b=>{setQuery(b.name);onSelect&&onSelect(b);setOpen(false);};
+  const handleBlur=()=>setTimeout(()=>setOpen(false),150);
+  const handleKeyDown=e=>{
+    if(e.key==="Enter"){e.preventDefault();if(suggestions.length>0)handleSelect(suggestions[0]);else{onSelect&&onSelect({name:query.trim(),aliases:[]});setOpen(false);}}
+    if(e.key==="Escape")setOpen(false);
+  };
+  return <div ref={wrapRef} style={{position:"relative",flex:1,...style}}>
+    <input value={query} onChange={handleChange} onFocus={()=>setOpen(true)} onBlur={handleBlur} onKeyDown={handleKeyDown}
+      autoFocus={autoFocus} placeholder={placeholder||"Type buyer name…"} autoComplete="off" spellCheck={false}
+      style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1.5px solid ${query?C.amberBd:C.border}`,fontFamily:C.sans,fontSize:13,color:C.text,background:"#fff",outline:"none",boxSizing:"border-box"}}/>
+    {open&&suggestions.length>0&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,right:0,background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,boxShadow:"0 4px 16px rgba(0,0,0,0.12)",zIndex:999,maxHeight:240,overflowY:"auto"}}>
+      {suggestions.map(b=><div key={b.id} onMouseDown={e=>{e.preventDefault();handleSelect(b);}}
+        style={{padding:"10px 14px",cursor:"pointer",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}
+        onMouseEnter={e=>e.currentTarget.style.background=C.amberBg}
+        onMouseLeave={e=>e.currentTarget.style.background="#fff"}>
+        <span style={{fontFamily:C.sans,fontSize:13,color:C.text}}>{b.name}</span>
+        <span style={{fontFamily:C.mono,fontSize:9,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px",flexShrink:0}}>{b.group}</span>
+      </div>)}
+    </div>}
+  </div>;
+}
+
+// ─── REVIEW ITEM ROW ──────────────────────────────────────────
+function ReviewItemRow({item,sIdx,iIdx,onChange,onSkip,skuList=[],lang="en"}){
+  const t=T[lang];
+  const [editSku,setEditSku]=useState(!item.confirmed);
+  const [skuVal,setSkuVal]=useState(item.sku);
+  const [editQty,setEditQty]=useState(false);
+  const [qtyVal,setQtyVal]=useState(String(item.qty));
+  // isLow: unconfirmed items needing review — includes custom (0%) and low-confidence
+  const isLow=!item.confirmed&&!(!item.sku||!item.sku.trim());
+  const saveSku=()=>{onChange(sIdx,iIdx,"sku",skuVal.trim().toUpperCase());onChange(sIdx,iIdx,"confirmed",true);setEditSku(false);};
+  const saveQty=()=>{const n=parseInt(qtyVal);if(!isNaN(n)&&n>0)onChange(sIdx,iIdx,"qty",n);setEditQty(false);};
+  // 2026-07-22 redesign (Figma "03 · Review & Confirm"): colour-coded card states +
+  // category subtitle + confidence pill. Visual reskin only — every edit/confirm/skip
+  // control below is unchanged (Archit chose reskin-only over the mock's pagination).
+  const skuObj=skuList.find(s=>s.id&&s.id.toUpperCase()===String(item.sku||"").toUpperCase());
+  const catName=skuObj?._catName||"";
+  const subtitle=item.custom?"Not in master · saved as custom":isLow?(catName?`${catName} — please check`:"Please check"):catName;
+  return <div style={{background:item.skipped?"#fff":item.custom?C.indigoBg:isLow?C.amberBg:"#fff",border:`1px solid ${item.skipped?C.border:item.custom?C.indigoBd:isLow?C.amberBd:C.border}`,borderRadius:10,padding:"12px 13px",marginBottom:8,opacity:item.skipped?0.4:1}}>
+    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8,flexWrap:"wrap"}}>
+      {editSku&&!item.skipped?<div style={{display:"flex",gap:6,flex:1,alignItems:"center"}}>
+        <SkuTypeahead
+          value={skuVal}
+          onChange={v=>setSkuVal(v)}
+          onSelect={(id,isCustom)=>{setSkuVal(id);onChange(sIdx,iIdx,"sku",id);onChange(sIdx,iIdx,"confirmed",true);onChange(sIdx,iIdx,"custom",isCustom);setEditSku(false);}}
+          skuList={skuList}
+          placeholder="e.g. HG 3615"
+          autoFocus
+          style={{flex:1}}
+        />
+        <button onClick={saveSku} style={{padding:"7px 10px",borderRadius:7,border:"none",background:C.green,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:13,flexShrink:0}}>✓</button>
+        <button onClick={()=>setEditSku(false)} style={{padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:13,flexShrink:0}}>✕</button>
+      </div>:<>
+        <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:item.custom?C.indigo:C.text,textDecoration:item.skipped?"line-through":"none",flex:1}}>{item.sku}
+          {item.custom&&<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px",marginLeft:6,color:C.indigo}}>CUSTOM</span>}
+          {isLow&&!item.custom&&<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:3,padding:"1px 5px",marginLeft:6,color:C.amber}}>CHECK</span>}
+        </span>
+        {!item.skipped&&<>
+          {!item.custom&&<span style={{fontFamily:C.mono,fontSize:10,fontWeight:500,padding:"2px 7px",borderRadius:6,background:item.confidence>=85?C.greenBg:C.amberBg,border:`1px solid ${item.confidence>=85?C.greenBd:C.amberBd}`,color:item.confidence>=85?C.green:C.amber}}>{item.confidence}%</span>}
+          {item.confirmed&&!item.custom&&<span style={{fontFamily:C.mono,fontSize:10,color:C.green}}>✓</span>}
+          <button onClick={()=>{setSkuVal(item.sku);setEditSku(true);}} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:11}}>{t.editSku}</button>
+        </>}
+      </>}
+    </div>
+    {!editSku&&!item.skipped&&subtitle&&<div style={{fontSize:11,color:C.textDim,marginTop:-4,marginBottom:8}}>{subtitle}</div>}
+    {!item.skipped&&<div style={{display:"flex",alignItems:"center",gap:8}}>
+      <span style={{fontSize:12,color:C.textDim}}>{t.qty}:</span>
+      {editQty?<div style={{display:"flex",gap:6}}>
+        <input type="text" inputMode="numeric" value={qtyVal} onChange={e=>setQtyVal(e.target.value.replace(/[^0-9]/g,""))} onKeyDown={e=>e.key==="Enter"&&saveQty()} autoFocus style={{width:60,padding:"4px 8px",borderRadius:7,border:`1px solid ${C.amber}`,fontFamily:C.mono,fontSize:14,color:C.amber,fontWeight:700,background:"#fff",outline:"none",textAlign:"center"}}/>
+        <button onClick={saveQty} style={{padding:"4px 10px",borderRadius:7,border:"none",background:C.green,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:13}}>✓</button>
+        <button onClick={()=>setEditQty(false)} style={{padding:"4px 10px",borderRadius:7,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:13}}>✕</button>
+      </div>:<>
+        <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.amber}}>×{item.qty}</span>
+        <button onClick={()=>{setQtyVal(String(item.qty));setEditQty(true);}} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:11}}>{t.editQtyBtn}</button>
+      </>}
+      <div style={{flex:1}}/>
+      <button onClick={onSkip} style={{padding:"3px 8px",borderRadius:6,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:11}}>{t.remove}</button>
+    </div>}
+    {isLow&&!item.skipped&&<div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${item.custom?C.indigoBd:C.amberBd}`}}>
+      <div style={{fontSize:11,color:item.custom?C.indigo:C.amber,marginBottom:8}}>
+        {item.custom ? t.customSkuWarning : `⚠ ${t.aiMatched} ${item.confidence}${t.verifyConfirm}`}
+      </div>
+      {!editSku&&<button onClick={()=>{onChange(sIdx,iIdx,"confirmed",true);}} style={{padding:"5px 12px",borderRadius:7,border:"none",background:C.green,color:"#fff",fontWeight:700,cursor:"pointer",fontSize:12}}>{t.confirmSku}</button>}
+    </div>}
+  </div>;
+}
+
+// ─── IMAGE CROP ───────────────────────────────────────────────
+function CropScreen({imgSrc,onCrop,onRetake,lang="en"}){
+  const t=T[lang];
+  const canvasRef=useRef();
+  const imgRef=useRef(new Image());
+  const [crop,setCrop]=useState({x:10,y:10,w:80,h:80}); // % of display size
+  const [dragging,setDragging]=useState(null); // null | 'move' | 'tl'|'tr'|'bl'|'br'
+  const [dragStart,setDragStart]=useState({x:0,y:0,crop:null});
+  const canvasSize={w:320,h:420};
+
+  useEffect(()=>{
+    const img=imgRef.current;
+    img.onload=()=>draw();
+    img.src=imgSrc;
+  },[imgSrc]);
+
+  useEffect(()=>{draw();},[crop]);
+
+  const draw=()=>{
+    const c=canvasRef.current;if(!c)return;
+    const ctx=c.getContext("2d");
+    const img=imgRef.current;if(!img.complete||!img.naturalWidth)return;
+    const {w,h}=canvasSize;
+    ctx.clearRect(0,0,w,h);
+    ctx.drawImage(img,0,0,w,h);
+    // dim overlay
+    ctx.fillStyle="rgba(0,0,0,0.5)";
+    const cx=crop.x/100*w,cy=crop.y/100*h,cw=crop.w/100*w,ch=crop.h/100*h;
+    ctx.fillRect(0,0,w,cy);
+    ctx.fillRect(0,cy+ch,w,h-cy-ch);
+    ctx.fillRect(0,cy,cx,ch);
+    ctx.fillRect(cx+cw,cy,w-cx-cw,ch);
+    // border
+    ctx.strokeStyle="#D97706";ctx.lineWidth=2;
+    ctx.strokeRect(cx,cy,cw,ch);
+    // corner handles
+    const hs=12;
+    [[cx,cy],[cx+cw-hs,cy],[cx,cy+ch-hs],[cx+cw-hs,cy+ch-hs]].forEach(([hx,hy])=>{
+      ctx.fillStyle="#D97706";ctx.fillRect(hx,hy,hs,hs);
+    });
+  };
+
+  const getXY=(e,c)=>{
+    const r=c.getBoundingClientRect();
+    const src=e.touches?e.touches[0]:e;
+    return{x:((src.clientX-r.left)/r.width)*100,y:((src.clientY-r.top)/r.height)*100};
+  };
+
+  const hitTest=(px,py)=>{
+    const {x,y,w,h}=crop;const hs=4;
+    if(Math.abs(px-x)<hs&&Math.abs(py-y)<hs)return"tl";
+    if(Math.abs(px-(x+w))<hs&&Math.abs(py-y)<hs)return"tr";
+    if(Math.abs(px-x)<hs&&Math.abs(py-(y+h))<hs)return"bl";
+    if(Math.abs(px-(x+w))<hs&&Math.abs(py-(y+h))<hs)return"br";
+    if(px>x&&px<x+w&&py>y&&py<y+h)return"move";
+    return null;
+  };
+
+  const onDown=e=>{
+    e.preventDefault();
+    const c=canvasRef.current;const{x,y}=getXY(e,c);
+    const hit=hitTest(x,y);
+    if(hit){setDragging(hit);setDragStart({x,y,crop:{...crop}});}
+  };
+  const onMove=e=>{
+    e.preventDefault();
+    if(!dragging)return;
+    const c=canvasRef.current;const{x,y}=getXY(e,c);
+    const dx=x-dragStart.x,dy=y-dragStart.y;
+    const p=dragStart.crop;
+    const clamp=(v,mn,mx)=>Math.max(mn,Math.min(mx,v));
+    let nc={...p};
+    if(dragging==="move"){nc.x=clamp(p.x+dx,0,100-p.w);nc.y=clamp(p.y+dy,0,100-p.h);}
+    else if(dragging==="tl"){nc.x=clamp(p.x+dx,0,p.x+p.w-10);nc.y=clamp(p.y+dy,0,p.y+p.h-10);nc.w=p.w-dx+clamp(0,-(p.x+dx),0);nc.h=p.h-dy+clamp(0,-(p.y+dy),0);nc.w=clamp(nc.w,10,100);nc.h=clamp(nc.h,10,100);}
+    else if(dragging==="tr"){nc.w=clamp(p.w+dx,10,100-p.x);nc.y=clamp(p.y+dy,0,p.y+p.h-10);nc.h=p.h-dy+clamp(0,-(p.y+dy),0);nc.h=clamp(nc.h,10,100);}
+    else if(dragging==="bl"){nc.x=clamp(p.x+dx,0,p.x+p.w-10);nc.w=p.w-dx+clamp(0,-(p.x+dx),0);nc.h=clamp(p.h+dy,10,100-p.y);nc.w=clamp(nc.w,10,100);}
+    else if(dragging==="br"){nc.w=clamp(p.w+dx,10,100-p.x);nc.h=clamp(p.h+dy,10,100-p.y);}
+    setCrop(nc);
+  };
+  const onUp=()=>setDragging(null);
+
+  const confirmCrop=()=>{
+    const img=imgRef.current;
+    const oc=document.createElement("canvas");
+    const sw=img.naturalWidth*crop.w/100,sh=img.naturalHeight*crop.h/100;
+    const sx=img.naturalWidth*crop.x/100,sy=img.naturalHeight*crop.y/100;
+    oc.width=sw;oc.height=sh;
+    oc.getContext("2d").drawImage(img,sx,sy,sw,sh,0,0,sw,sh);
+    const b64=oc.toDataURL("image/jpeg",0.92).split(",")[1];
+    onCrop(b64,oc.toDataURL("image/jpeg",0.92));
+  };
+
+  return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:"#000"}}>
+    <div style={{padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",background:"#111"}}>
+      <button onClick={onRetake} style={{background:"none",border:"none",color:"#ccc",cursor:"pointer",fontSize:13,fontFamily:"sans-serif"}}>{t.retake}</button>
+      <span style={{color:"#D97706",fontWeight:700,fontSize:13,fontFamily:"monospace"}}>{t.cropTitle}</span>
+      <button onClick={confirmCrop} style={{background:"#D97706",border:"none",color:"#fff",cursor:"pointer",fontSize:13,fontWeight:700,padding:"6px 14px",borderRadius:8,fontFamily:"sans-serif"}}>{t.analyse}</button>
+    </div>
+    <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{fontSize:12,color:"#aaa",marginBottom:12,textAlign:"center"}}>{t.cropHint}</div>
+      <canvas ref={canvasRef} width={canvasSize.w} height={canvasSize.h}
+        style={{borderRadius:8,touchAction:"none",maxWidth:"100%"}}
+        onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
+        onTouchStart={onDown} onTouchMove={onMove} onTouchEnd={onUp}/>
+    </div>
+  </div>;
+}
+
+// ─── SCAN SCREEN ──────────────────────────────────────────────
+function ScanScreen({actorName,onBack,onConfirm,skuList,catList,buyerList=[],onAddAlias,lang="en",setLang}){
+  const t=T[lang];
+  const [stage,setStage]=useState("manual"); // manual (default — manual-first entry)|choose|crop|analysing|reviewing
+  const [rawImgSrc,setRawImgSrc]=useState(null);
+  const [imgSrc,setImgSrc]=useState(null);
+  const [imgB64,setImgB64]=useState(null);
+  const [ext,setExt]=useState(null);
+  const [error,setError]=useState(null);
+  const [imgExpanded,setImgExpanded]=useState(false);
+  // Manual entry state
+  const [manualLines,setManualLines]=useState([{cat:"",sku:"",qty:"1"}]);
+  const [manualSection,setManualSection]=useState("");
+  const [manualNotes,setManualNotes]=useState("");
+  const fileRef=useRef();
+  const triggerCamera=()=>{fileRef.current.setAttribute("capture","environment");fileRef.current.click();};
+  const triggerUpload=()=>{fileRef.current.removeAttribute("capture");fileRef.current.click();};
+  const handleFile=e=>{
+    const file=e.target.files[0];if(!file)return;
+    const reader=new FileReader();
+    reader.onload=ev=>{setRawImgSrc(ev.target.result);setStage("crop");};
+    reader.readAsDataURL(file);e.target.value="";
+  };
+  const handleCrop=(b64,previewSrc)=>{setImgB64(b64);setImgSrc(previewSrc);analyse(b64);};
+  const analyse=async(b64)=>{
+    setStage("analysing");setError(null);
+    try{
+      const result=await extractOrderFromImage(b64,skuList,null,buyerList,catList);
+      if(result.parseError||result.sections.every(s=>s.items.length===0)){
+        setError(lang==="hi"?"SKU नहीं निकाले जा सके। फसल को और कसकर समायोजित करें।":"Couldn't extract SKUs. Adjust the crop more tightly and try again.");
+        setStage("analyseError");
+        return;
+      }
+      setExt(result);setStage("reviewing");
+    }catch(err){setError(lang==="hi"?"छवि पढ़ने में विफल। कनेक्शन जांचें।":"Failed to read image. Check connection.");setStage("analyseError");}
+  };
+  const updateItem=(sIdx,iIdx,field,value)=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].items[iIdx][field]=value;return n;});
+  if(stage==="crop"&&rawImgSrc)return <CropScreen key="crop" imgSrc={rawImgSrc} onCrop={handleCrop} onRetake={()=>{setRawImgSrc(null);setStage("choose");setError(null);}} lang={lang}/>;
+  const skipItem=(sIdx,iIdx)=>updateItem(sIdx,iIdx,"skipped",true);
+  // Items needing review: unconfirmed AND have a non-empty SKU (blank new rows excluded)
+  const lowConfPending=ext?ext.sections.flatMap(s=>s.items.filter(i=>!i.skipped&&!i.confirmed&&i.sku&&i.sku.trim())):[];
+  const canConfirm=lowConfPending.length===0;
+  const confirm=()=>{
+    const validSections=ext.sections.map(sec=>({
+      name:sec.name,
+      items:sec.items.filter(i=>!i.skipped&&i.sku&&i.sku.trim()).map(i=>({id:Date.now()+Math.random(),sku:i.sku.trim().toUpperCase(),origQty:i.qty,qty:i.qty,status:"pending",note:"",handledBy:null,confidence:i.confidence,custom:i.custom||false}))
+    })).filter(s=>s.items.length>0);
+    validSections.forEach(sec=>{
+      const srcSec=ext.sections.find(s=>s.name===sec.name);
+      onConfirm({id:genId(),date:TODAY,scannedAt:nowDateTime(),createdAt:Date.now(),status:"live",notes:srcSec?.notes||"",sections:[sec]});
+    });
+  };
+  const totalItems=ext?ext.sections.reduce((s,sec)=>s+sec.items.filter(i=>!i.skipped).length,0):0;
+  return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg}}>
+    <input ref={fileRef} type="file" accept="image/*" style={{display:"none"}} onChange={handleFile}/>
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,background:"#fff",display:"flex",alignItems:"center",gap:12}}>
+      <button onClick={onBack} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:22,lineHeight:1,padding:0}}>←</button>
+      <span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:C.text,letterSpacing:"0.5px"}}>{t.newOrderTitle}</span>
+      <div style={{flex:1}}/>
+      {setLang&&<LangToggle lang={lang} setLang={setLang}/>}
+      <span style={{fontFamily:C.mono,fontSize:11,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:6,padding:"4px 10px"}}>{actorName}</span>
+    </div>
+    <div style={{flex:1,overflowY:"auto",padding:"20px 20px 40px"}}>
+      {stage==="choose"&&<>
+        <div style={{fontSize:13,color:C.textDim,textAlign:"center",marginBottom:16}}>{t.chooseOrder}</div>
+        <button onClick={triggerCamera} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.amberBd}`,background:C.amberBg,cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left",marginBottom:12}}>
+          <span style={{fontSize:30,flexShrink:0}}>📷</span>
+          <div><div style={{fontWeight:700,fontSize:15,color:C.amber,marginBottom:2}}>{t.takePhoto}</div><div style={{fontSize:12,color:C.textDim}}>{t.takePhotoSub}</div></div>
+        </button>
+        <button onClick={triggerUpload} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left",boxShadow:"0 1px 3px rgba(0,0,0,0.06)",marginBottom:12}}>
+          <span style={{fontSize:30,flexShrink:0}}>🖼️</span>
+          <div><div style={{fontWeight:700,fontSize:15,color:C.text,marginBottom:2}}>{t.uploadGallery}</div><div style={{fontSize:12,color:C.textDim}}>{t.uploadGallerySub}</div></div>
+        </button>
+        <button onClick={()=>{setManualLines([{cat:"",sku:"",qty:1}]);setManualSection("");setManualNotes("");setStage("manual");}} style={{width:"100%",padding:20,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,display:"flex",alignItems:"center",gap:16,textAlign:"left",boxShadow:"0 1px 3px rgba(0,0,0,0.06)",marginBottom:12}}>
+          <span style={{fontSize:30,flexShrink:0}}>✏️</span>
+          <div><div style={{fontWeight:700,fontSize:15,color:C.text,marginBottom:2}}>{t.enterManually}</div><div style={{fontSize:12,color:C.textDim}}>{t.enterManuallySub}</div></div>
+        </button>
+        <Btn onClick={()=>setStage("manual")} color="ghost" sx={{width:"100%",padding:11}}>{t.back}</Btn>
+      </>}
+
+      {stage==="manual"&&<>
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:5}}>{t.customerName}</div>
+          <BuyerTypeahead value={manualSection} onChange={v=>setManualSection(v)} onSelect={b=>setManualSection(b.name)} placeholder="e.g. Mahavir Traders" buyerList={buyerList}/>
+        </div>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:10}}>{t.items}</div>
+        {manualLines.map((line,idx)=>{
+          const isCustomSku=line.sku&&!skuList.find(s=>s.id.toUpperCase()===line.sku.toUpperCase());
+          return <div key={idx} style={{background:isCustomSku?C.indigoBg:"#fff",border:`1px solid ${isCustomSku?C.indigoBd:C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8}}>
+            <div style={{display:"flex",gap:8,alignItems:"flex-start",marginBottom:10}}>
+              <SkuTypeahead
+                value={line.sku}
+                onChange={val=>{const n=[...manualLines];n[idx]={...n[idx],sku:val};setManualLines(n);}}
+                onSelect={(skuId,isCustom,cat)=>{const n=[...manualLines];n[idx]={...n[idx],sku:skuId,cat:cat||n[idx].cat,custom:isCustom};setManualLines(n);}}
+                skuList={skuList}
+                autoFocus={idx===manualLines.length-1&&!line.sku}
+                placeholder="Type SKU code…"
+              />
+              {manualLines.length>1&&<button onClick={()=>setManualLines(manualLines.filter((_,i)=>i!==idx))}
+                style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:13,flexShrink:0}}>✕</button>}
+            </div>
+            {isCustomSku&&line.sku&&<div style={{fontSize:11,color:C.indigo,marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+              <span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px"}}>CUSTOM SKU</span>
+              <span>Not in master list — will be saved as-is</span>
+            </div>}
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:12,color:C.textDim,flexShrink:0}}>{t.qty}:</span>
+              <button onClick={()=>{const n=[...manualLines];n[idx].qty=String(Math.max(1,(parseInt(n[idx].qty)||1)-1));setManualLines(n);}} style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:16,color:C.textDim}}>−</button>
+              <input type="text" inputMode="numeric" value={line.qty} onChange={e=>{const n=[...manualLines];n[idx].qty=e.target.value.replace(/[^0-9]/g,"");setManualLines(n);}}
+                style={{width:60,padding:"4px 0",borderRadius:7,border:`1px solid ${C.amberBd}`,fontFamily:C.mono,fontWeight:700,fontSize:18,textAlign:"center",color:C.amber,background:"#fff",outline:"none"}}/>
+              <button onClick={()=>{const n=[...manualLines];n[idx].qty=String((parseInt(n[idx].qty)||0)+1);setManualLines(n);}} style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:16,color:C.textDim}}>+</button>
+            </div>
+          </div>;
+        })}
+        <Btn onClick={()=>setManualLines([...manualLines,{cat:"",sku:"",qty:"1"}])} color="ghost" sx={{width:"100%",padding:10,marginBottom:16}}>{t.addSku}</Btn>
+        <div style={{marginBottom:16}}>
+          <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:5}}>ORDER NOTES (optional)</div>
+          <textarea value={manualNotes} onChange={e=>setManualNotes(e.target.value)} rows={2} placeholder={lang==="hi"?"नोट लिखें…":"e.g. Priority, delivery instructions…"} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",resize:"none",boxSizing:"border-box"}}/>
+        </div>
+        {(()=>{
+          const validLines=manualLines.filter(l=>l.sku&&l.sku.trim());
+          const canSubmit=validLines.length>0;
+          return <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <Btn onClick={()=>{
+              if(!canSubmit)return;
+              const order={id:genId(),date:TODAY,scannedAt:nowDateTime(),createdAt:Date.now(),status:"live",notes:manualNotes.trim(),sections:[{
+                name:manualSection.trim()||"Manual Entry",
+                items:validLines.map(l=>({id:Date.now()+Math.random(),sku:l.sku.trim().toUpperCase(),origQty:parseInt(l.qty)||1,qty:parseInt(l.qty)||1,status:"pending",note:"",handledBy:null,confidence:100,custom:l.custom||false}))
+              }]};
+              onConfirm(order);
+            }} color={canSubmit?"green":"ghost"} sx={{width:"100%",padding:13,fontSize:14,opacity:canSubmit?1:0.5,cursor:canSubmit?"pointer":"not-allowed"}}>
+              {canSubmit?`${t.createOrders} ${t.orders} (${validLines.length})`:"Type at least one SKU"}
+            </Btn>
+            <Btn onClick={()=>setStage("choose")} color="ghost" sx={{width:"100%",padding:12,minHeight:46}}>{t.scanInstead}</Btn>
+          </div>;
+        })()}
+      </>}
+      {stage==="preview"&&<>
+        <img src={imgSrc} alt="slip" style={{width:"100%",borderRadius:12,border:`1px solid ${C.border}`,display:"block",marginBottom:12}}/>
+        {error&&<div style={{background:C.redBg,border:`1px solid ${C.redBd}`,borderRadius:10,padding:"12px 14px",marginBottom:12,fontSize:13,color:C.red}}>{error}</div>}
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={()=>{setImgSrc(null);setImgB64(null);setError(null);setStage("choose");}} color="ghost" sx={{flex:1}}>↩ Retake</Btn>
+          <Btn onClick={analyse} color="amber" sx={{flex:2}}>⚡ Analyse Order</Btn>
+        </div>
+      </>}
+      {stage==="analysing"&&<>
+        {imgSrc&&<img src={imgSrc} alt="slip" style={{width:"100%",borderRadius:12,border:`1px solid ${C.border}`,display:"block",marginBottom:12,opacity:0.5}}/>}
+        <div style={{background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:10,padding:16,textAlign:"center"}}>
+          <div style={{fontSize:22,marginBottom:8}}>⭐</div>
+          <div style={{fontWeight:700,color:C.amber,fontSize:14,marginBottom:4}}>{t.reading}</div>
+          <div style={{fontSize:12,color:C.textDim}}>{t.premiumSub}</div>
+        </div>
+      </>}
+      {stage==="analyseError"&&<>
+        {imgSrc&&<img src={imgSrc} alt="slip" style={{width:"100%",borderRadius:12,border:`1px solid ${C.border}`,display:"block",marginBottom:12}}/>}
+        <div style={{background:C.redBg,border:`1px solid ${C.redBd}`,borderRadius:10,padding:"14px 16px",marginBottom:16}}>
+          <div style={{fontWeight:700,color:C.red,fontSize:13,marginBottom:4}}>⚠ Extraction failed</div>
+          <div style={{fontSize:12,color:C.red,opacity:0.85}}>{error}</div>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <Btn onClick={()=>{setStage("crop");setError(null);}} color="amber" sx={{width:"100%",padding:12,fontSize:14}}>{t.adjustCrop}</Btn>
+          <Btn onClick={()=>{setRawImgSrc(null);setImgSrc(null);setImgB64(null);setError(null);setStage("choose");}} color="ghost" sx={{width:"100%",padding:11}}>{t.retakePhoto}</Btn>
+        </div>
+      </>}
+      {stage==="reviewing"&&ext&&<>
+        {imgSrc&&<img src={imgSrc} alt="slip" onClick={()=>setImgExpanded(true)} style={{width:"100%",borderRadius:10,border:`1px solid ${C.border}`,display:"block",maxHeight:160,objectFit:"cover",marginBottom:14,cursor:"zoom-in"}}/>}
+        {imgExpanded&&<div onClick={()=>setImgExpanded(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.9)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+          <img src={imgSrc} alt="slip" style={{maxWidth:"100%",maxHeight:"100%",borderRadius:8,objectFit:"contain"}}/>
+          <button onClick={()=>setImgExpanded(false)} style={{position:"absolute",top:16,right:16,background:"rgba(255,255,255,0.15)",border:"none",color:"#fff",borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:13,fontFamily:C.sans}}>✕ Close</button>
+        </div>}
+        <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"10px 14px",marginBottom:14,display:"flex",alignItems:"center",gap:12}}>
+          <div style={{flex:1,fontSize:13,color:C.text,fontWeight:600}}>{totalItems} {t.itemsExtracted}</div>
+          {lowConfPending.length>0?<span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:4,background:C.amberBg,color:C.amber,border:`1px solid ${C.amberBd}`}}>{lowConfPending.length} {t.needReview}</span>:<span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:4,background:C.greenBg,color:C.green,border:`1px solid ${C.greenBd}`}}>{t.allVerified}</span>}
+        </div>
+        {ext.notes&&<div style={{background:C.blueBg,border:`1px solid ${C.blueBd}`,borderRadius:10,padding:"10px 14px",marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,color:C.blue,letterSpacing:"0.8px",marginBottom:4}}>{t.notesCaptured}</div>
+          <div style={{fontSize:12,color:C.text}}>{ext.notes}</div>
+        </div>}
+        {ext.sections.map((sec,sIdx)=><div key={sIdx} style={{marginBottom:20}}>
+          <div style={{fontSize:11,fontWeight:700,letterSpacing:"0.8px",color:C.textDim,marginBottom:8,display:"flex",alignItems:"center",gap:8}}>
+            <span style={{color:C.amber}}>§</span>
+            <BuyerTypeahead
+              value={sec.name}
+              onChange={v=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].name=v;n.sections[sIdx]._pendingAlias=v;return n;})}
+              onSelect={b=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].name=b.name;n.sections[sIdx]._resolvedBuyer=b;delete n.sections[sIdx]._pendingAlias;return n;})}
+              placeholder="Buyer name…"
+              style={{flex:1}}
+              buyerList={buyerList}
+            />
+            {(sec._confidence!==undefined&&sec._confidence<95)||(!sec._confidence&&sec._raw)?<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:4,padding:"2px 6px",color:C.amber,whiteSpace:"nowrap"}}>{t.unmatched}</span>:null}
+          </div>
+          {sec._aliasSaved&&<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,marginTop:-4,paddingLeft:18}}><span style={{fontSize:11,color:C.green,fontWeight:700}}>✓ Alias saved</span></div>}
+          {!sec._aliasSaved&&sec._raw&&sec._resolvedBuyer&&sec._resolvedBuyer.name!==sec._raw&&<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,marginTop:-4,paddingLeft:18}}>
+            <span style={{fontSize:11,color:C.textDim}}>"{sec._raw}" → <strong style={{color:C.text}}>{sec._resolvedBuyer.name}</strong></span>
+            <button onMouseDown={e=>{e.preventDefault();if(onAddAlias)onAddAlias(sec._resolvedBuyer,sec._raw);setExt(prev=>{const n=cl(prev);n.sections[sIdx]._aliasSaved=true;delete n.sections[sIdx]._raw;delete n.sections[sIdx]._resolvedBuyer;return n;});}}
+              style={{padding:"2px 8px",borderRadius:5,border:`1px solid ${C.greenBd}`,background:C.greenBg,color:C.green,cursor:"pointer",fontSize:10,fontWeight:700,fontFamily:C.mono,whiteSpace:"nowrap"}}>
+              {t.saveAlias}
+            </button>
+          </div>}
+          {sec.notes!==null
+            ?<div style={{background:C.blueBg,border:`1px solid ${C.blueBd}`,borderRadius:8,padding:"8px 12px",marginBottom:8}}>
+                <textarea
+                  value={sec.notes||""}
+                  onChange={e=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].notes=e.target.value;return n;})}
+                  rows={2}
+                  placeholder={lang==="hi"?"नोट लिखें…":"Add note…"}
+                  style={{width:"100%",padding:0,border:"none",background:"transparent",fontSize:12,fontFamily:C.sans,outline:"none",color:C.text,resize:"none",boxSizing:"border-box",lineHeight:1.5,display:"block"}}
+                />
+                <button onClick={()=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].notes=null;return n;})} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:11,fontFamily:C.sans,padding:0,marginTop:2}}>{t.removeNote}</button>
+              </div>
+            :<button onClick={()=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].notes="";return n;})} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:11,fontFamily:C.sans,padding:"0 0 8px 0",display:"block"}}>{t.addNote}</button>}
+          {sec.items.map((item,iIdx)=><ReviewItemRow key={iIdx} item={item} sIdx={sIdx} iIdx={iIdx} onChange={updateItem} onSkip={()=>skipItem(sIdx,iIdx)} skuList={skuList} lang={lang}/>)}
+          <div style={{display:"flex",gap:8,marginTop:6}}>
+            <button onClick={()=>setExt(prev=>{const n=cl(prev);n.sections[sIdx].items.push({sku:"",qty:1,confidence:0,skipped:false,confirmed:false,custom:false});return n;})}
+              style={{flex:1,padding:"8px",borderRadius:8,border:`1px dashed ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer",fontSize:12,fontFamily:C.sans}}>
+              {t.addMissedSku} {sec.name}
+            </button>
+            {ext.sections.length>1&&<button
+              onClick={()=>setExt(prev=>{const n=cl(prev);n.sections=n.sections.filter((_,i)=>i!==sIdx);return n;})}
+              style={{padding:"8px 12px",borderRadius:8,border:`1px dashed ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:12,fontFamily:C.sans,flexShrink:0}}>
+              {t.removeSection}
+            </button>}
+          </div>
+        </div>)}
+        {!canConfirm&&<div style={{background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:10,padding:"12px 14px",marginBottom:12,fontSize:12,color:C.amber}}>⚠ {t.reviewWarning} {lowConfPending.length} {t.uncertainItems}{lowConfPending.length>1?"s":""}</div>}
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>
+          {(()=>{const cnt=ext.sections.filter(s=>s.items.some(i=>!i.skipped&&i.sku)).length;return<Btn onClick={confirm} color={canConfirm?"green":"ghost"} sx={{width:"100%",padding:13,fontSize:14,opacity:canConfirm?1:0.5,cursor:canConfirm?"pointer":"not-allowed"}}>{canConfirm?`${t.createOrders} ${cnt} ${t.orders}`:`${t.reviewWarning} ${lowConfPending.length} ${t.uncertainItems}`}</Btn>;})()}
+          <Btn onClick={()=>{setStage("choose");setExt(null);setError(null);}} color="ghost" sx={{width:"100%",padding:11}}>{t.startOver}</Btn>
+        </div>
+      </>}
+    </div>
+  </div>;
+}
+
+// ─── ORDER NOTES CALLOUT ──────────────────────────────────────
+function OrderNotesCallout({notes,onSave,lang="en"}){
+  const t=T[lang];
+  const [editing,setEditing]=useState(false);
+  const [val,setVal]=useState(notes||"");
+  useEffect(()=>{setVal(notes||"");},[notes]);
+  const hasNotes=notes&&notes.trim();
+  if(!hasNotes&&!editing)return(
+    <button onClick={()=>setEditing(true)} style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:11,fontFamily:C.sans,marginBottom:12,padding:0}}>
+      {t.addOrderNotes}
+    </button>
+  );
+  return(
+    <div style={{background:C.blueBg,border:`1px solid ${C.blueBd}`,borderRadius:10,padding:"12px 14px",marginBottom:14}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+        <span style={{fontSize:10,fontWeight:700,color:C.blue,letterSpacing:"0.8px"}}>{t.orderNotes}</span>
+        {!editing&&<button onClick={()=>{setVal(notes||"");setEditing(true);}} style={{background:"none",border:"none",color:C.blue,cursor:"pointer",fontSize:11,fontFamily:C.sans}}>{lang==="hi"?"बदलें":"Edit"}</button>}
+      </div>
+      {editing?<>
+        <textarea value={val} onChange={e=>setVal(e.target.value)} rows={3}
+          style={{width:"100%",padding:"8px 10px",borderRadius:7,border:`1px solid ${C.blueBd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",resize:"vertical"}}/>
+        <div style={{display:"flex",gap:8,marginTop:8}}>
+          <Btn onClick={()=>{onSave(val.trim());setEditing(false);}} color="green" sx={{flex:1,padding:8,fontSize:12}}>{t.save}</Btn>
+          <Btn onClick={()=>setEditing(false)} color="ghost" sx={{padding:"8px 12px",fontSize:12}}>{t.cancel}</Btn>
+        </div>
+      </>:<div style={{fontSize:13,color:C.text,lineHeight:1.5}}>{notes}</div>}
+    </div>
+  );
+}
+
+// ─── EDIT ORDER SCREEN ────────────────────────────────────────
+function EditOrderScreen({order,skuList,onSave,onCancel}){
+  // Deep-clone order sections into local editable state
+  const [sections,setSections]=useState(()=>order.sections.map(sec=>({
+    name:sec.name,
+    items:sec.items.map(it=>({...it,_qtyStr:String(it.origQty)}))
+  })));
+
+  const updateSecName=(sIdx,val)=>setSections(prev=>{const n=cl(prev);n[sIdx].name=val;return n;});
+  const updateItemSku=(sIdx,iIdx,val,isCustom)=>setSections(prev=>{const n=cl(prev);n[sIdx].items[iIdx].sku=val;n[sIdx].items[iIdx].custom=isCustom||false;return n;});
+  const updateItemQty=(sIdx,iIdx,val)=>setSections(prev=>{const n=cl(prev);n[sIdx].items[iIdx]._qtyStr=val;n[sIdx].items[iIdx].origQty=parseInt(val)||1;n[sIdx].items[iIdx].qty=parseInt(val)||1;return n;});
+  const removeItem=(sIdx,iIdx)=>setSections(prev=>{const n=cl(prev);n[sIdx].items=n[sIdx].items.filter((_,i)=>i!==iIdx);return n.filter(s=>s.items.length>0);});
+  const addItem=(sIdx)=>setSections(prev=>{
+    const n=cl(prev);
+    n[sIdx].items.push({id:Date.now()+Math.random(),sku:"",origQty:1,qty:1,_qtyStr:"1",status:"pending",note:"",handledBy:null,confidence:100,custom:false});
+    return n;
+  });
+  const addSection=()=>setSections(prev=>[...prev,{name:"New Section",items:[{id:Date.now()+Math.random(),sku:"",origQty:1,qty:1,_qtyStr:"1",status:"pending",note:"",handledBy:null,confidence:100,custom:false}]}]);
+
+  const save=()=>{
+    // Filter out blank SKUs, fix qtys
+    const cleaned=sections.map(sec=>({
+      ...sec,
+      items:sec.items
+        .filter(it=>it.sku&&it.sku.trim())
+        .map(it=>({...it,sku:it.sku.trim().toUpperCase(),origQty:parseInt(it._qtyStr)||1,qty:parseInt(it._qtyStr)||1}))
+    })).filter(s=>s.items.length>0);
+    if(cleaned.length===0){alert("Order needs at least one SKU.");return;}
+    onSave(cleaned);
+  };
+
+  return <div style={{position:"fixed",inset:0,background:C.bg,zIndex:200,display:"flex",flexDirection:"column"}}>
+    {/* Header */}
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,background:"#fff",display:"flex",alignItems:"center",gap:12,flexShrink:0}}>
+      <button onClick={onCancel} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:22,lineHeight:1,padding:0}}>✕</button>
+      <div style={{flex:1}}>
+        <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>EDIT ORDER</span>
+        <span style={{fontFamily:C.mono,fontSize:12,color:C.textDim,marginLeft:8}}>{order.id}</span>
+      </div>
+      <Btn onClick={save} color="green" sx={{padding:"8px 16px",fontSize:13}}>Save</Btn>
+    </div>
+
+    <div style={{flex:1,overflowY:"auto",padding:"16px 20px 40px"}}>
+      {sections.map((sec,sIdx)=><div key={sIdx} style={{marginBottom:20}}>
+        {/* Section name */}
+        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+          <span style={{color:C.amber,fontSize:14,flexShrink:0}}>§</span>
+          <BuyerTypeahead
+            value={sec.name}
+            onChange={v=>updateSecName(sIdx,v)}
+            onSelect={b=>updateSecName(sIdx,b.name)}
+            placeholder="Buyer name…"
+            style={{flex:1}}
+          />
+        </div>
+
+        {/* Items */}
+        {sec.items.map((item,iIdx)=>{
+          const isCustom=item.custom||(!skuList.find(s=>s.id.toUpperCase()===(item.sku||"").toUpperCase())&&item.sku);
+          return <div key={item.id||iIdx} style={{background:isCustom?C.indigoBg:"#fff",border:`1px solid ${isCustom?C.indigoBd:C.border}`,borderRadius:10,padding:"11px 14px",marginBottom:8}}>
+            <div style={{display:"flex",gap:8,alignItems:"flex-start",marginBottom:8}}>
+              <SkuTypeahead
+                value={item.sku}
+                onChange={val=>updateItemSku(sIdx,iIdx,val,false)}
+                onSelect={(id,isC)=>updateItemSku(sIdx,iIdx,id,isC)}
+                skuList={skuList}
+                placeholder="SKU code…"
+                style={{flex:1}}
+              />
+              <button onClick={()=>removeItem(sIdx,iIdx)}
+                style={{padding:"9px 11px",borderRadius:8,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:13,flexShrink:0}}>✕</button>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:12,color:C.textDim,flexShrink:0}}>Qty:</span>
+              <button onClick={()=>updateItemQty(sIdx,iIdx,String(Math.max(1,(parseInt(item._qtyStr)||1)-1)))}
+                style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:16,color:C.textDim}}>−</button>
+              <input type="text" inputMode="numeric" value={item._qtyStr} min={1}
+                onChange={e=>updateItemQty(sIdx,iIdx,e.target.value.replace(/[^0-9]/g,""))}
+                style={{width:60,padding:"4px 0",borderRadius:7,border:`1px solid ${C.amberBd}`,fontFamily:C.mono,fontWeight:700,fontSize:18,textAlign:"center",color:C.amber,background:"#fff",outline:"none"}}/>
+              <button onClick={()=>updateItemQty(sIdx,iIdx,String((parseInt(item._qtyStr)||1)+1))}
+                style={{width:32,height:32,borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:16,color:C.textDim}}>+</button>
+              {item.status!=="pending"&&<span style={{fontFamily:C.mono,fontSize:10,color:C.textDim,marginLeft:4}}>({item.status})</span>}
+            </div>
+          </div>;
+        })}
+
+        {/* Add SKU to this section */}
+        <button onClick={()=>addItem(sIdx)}
+          style={{width:"100%",padding:"9px",borderRadius:8,border:`1px dashed ${C.border}`,background:"transparent",color:C.textDim,cursor:"pointer",fontSize:12,fontFamily:C.sans}}>
+          + Add SKU to {sec.name}
+        </button>
+      </div>)}
+
+      {/* Add new section */}
+      <button onClick={addSection}
+        style={{width:"100%",padding:12,borderRadius:10,border:`1px dashed ${C.amberBd}`,background:C.amberBg,color:C.amber,cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:C.sans,marginTop:8}}>
+        + Add New Section / Customer
+      </button>
+    </div>
+  </div>;
+}
+
+// ─── ORDER DETAIL ─────────────────────────────────────────────
+function OrderDetail({order,actorName,isAdmin,onBack,onUpdate,onBilled,onReopen,onProcess,onSendToBilling,skuList,catList,lang="en",setLang,buyerList=[],partyRates={},onSetPartyRate,onSetSeriesPartyRate}){
+  const t=T[lang];
+  const [expandedKey,setExpandedKey]=useState(null);
+  const [billingOpen,setBillingOpen]=useState(false);
+  const [editQty,setEditQty]=useState("");
+  const [editNote,setEditNote]=useState("");
+  const [editMode,setEditMode]=useState(false);
+  // Edit mode for order metadata
+  const [editingSec,setEditingSec]=useState(null); // sIdx
+  const [secName,setSecName]=useState("");
+  const [editingItemSku,setEditingItemSku]=useState(null); // {sIdx,iIdx}
+  const [itemSkuVal,setItemSkuVal]=useState("");
+
+  // ── Party-wise rates: edited inline in the billing modal, persisted per buyer ──
+  const [rateEdits,setRateEdits]=useState({}); // in-progress edits, keyed by sanitized SKU
+  const [manualPartyId,setManualPartyId]=useState(null); // admin-linked ledger when name auto-match fails
+  const [linkVal,setLinkVal]=useState(""); // ledger-picker text buffer
+  useEffect(()=>{setRateEdits({});setManualPartyId(null);setLinkVal("");},[order.id]); // reset buffers when switching orders
+  const autoBuyer=buyerList.find(b=>(b.name||"").toLowerCase()===(order.sections?.[0]?.name||"").toLowerCase());
+  const autoPartyId=autoBuyer?autoBuyer.id:null;
+  const partyId=manualPartyId!=null?manualPartyId:autoPartyId;
+  const partyBuyer=manualPartyId!=null?buyerList.find(b=>b.id===manualPartyId):autoBuyer;
+  const skuKey=s=>String(s==null?"":s).replace(/[^a-zA-Z0-9]/g,"_");
+  const resolveRate=sku=>{const e=rateEdits[skuKey(sku)];if(e!==undefined&&e!=="")return Number(e)||0;return getPartyRate(partyId,sku,partyRates,skuList,catList);};
+  const commitRate=sku=>{if(partyId==null)return;const e=rateEdits[skuKey(sku)];if(e===undefined)return;const sk=skuList.find(x=>x.id&&x.id.toUpperCase()===String(sku).toUpperCase());if(sk&&sk.cat&&sk.series&&onSetSeriesPartyRate)onSetSeriesPartyRate(partyId,sk.cat,sk.series,e===""?null:{mode:"abs",value:Number(e)||0});else if(onSetPartyRate)onSetPartyRate(partyId,sku,e===""?null:Number(e));};
+
+  const isBilled=order.status==="billed";
+  const isProcessed=order.status==="processed";
+  const all=allItems(order),pending=all.filter(i=>i.status==="pending"),handled=all.filter(i=>i.status!=="pending");
+  const ready=pending.length===0,pct=all.length?Math.round((handled.length/all.length)*100):0;
+  const findIdx=item=>{let sI=-1,iI=-1;order.sections.forEach((sec,si)=>sec.items.forEach((it,ii)=>{if(it.id===item.id){sI=si;iI=ii;}}));return[sI,iI];};
+
+  // Undo unrestricted — any staff or admin can undo
+  const undoItem=(sIdx,iIdx)=>onUpdate(sIdx,iIdx,{status:"pending",handledBy:null});
+  const setStatus=(sIdx,iIdx,status)=>{onUpdate(sIdx,iIdx,{status,handledBy:actorName});if(expandedKey===`${sIdx}-${iIdx}`)setExpandedKey(null);};
+  const openOverride=(key,item)=>{setExpandedKey(key);setEditQty(String(item.qty||item.origQty));setEditNote(item.note||"");};
+  const saveOverride=(sIdx,iIdx,origQty)=>{const qty=parseInt(editQty);if(!isNaN(qty)&&qty>0)onUpdate(sIdx,iIdx,{qty,note:editNote,status:qty>=origQty?"fulfilled":"partial",handledBy:actorName});setExpandedKey(null);};
+
+  // Edit section name
+  const saveSectionName=sIdx=>{if(secName.trim())onUpdate(sIdx,-1,{_sectionName:secName.trim()});setEditingSec(null);};
+  // Edit item SKU
+  const saveItemSku=(sIdx,iIdx)=>{if(itemSkuVal.trim())onUpdate(sIdx,iIdx,{sku:itemSkuVal.trim().toUpperCase()});setEditingItemSku(null);};
+  const saveItemSkuCustom=(sIdx,iIdx,id,isCustom)=>{onUpdate(sIdx,iIdx,{sku:id.toUpperCase(),custom:isCustom||false});setEditingItemSku(null);};
+
+  const byStaff={};handled.forEach(item=>{const k=item.handledBy||"Unknown";(byStaff[k]=byStaff[k]||[]).push(item);});
+  const idBg=ready?C.greenBg:C.amberBg,idC=ready?C.green:C.amber,idBd=ready?C.greenBd:C.amberBd;
+
+  // Tally export — buyer name, order id, date, voucher type columns.
+  // CSV cells are quote-escaped and formula-injection-neutralised (leading =,+,-,@).
+  const VOUCHER_TYPE="Sales";
+  const CGST_LEDGER="CGST@ 9%", SGST_LEDGER="SGST @ 9%"; // must match Tally ledger names exactly
+  const exportTally=()=>{
+    const buyer=order.sections.map(s=>s.name).join(" / ");
+    const cell=v=>{let s=String(v==null?"":v);if(/^[=+\-@\t\r]/.test(s))s="'"+s;return `"${s.replace(/"/g,'""')}"`;};
+    const header=["Date","Voucher Type","Order ID","Buyer","SKU","Qty Requested","Qty Sent","Unit","Billed Units","Rate","Taxable Value","CGST","SGST","Line Total","Status"];
+    const rows=[header.map(cell).join(",")];
+    const push=(i,qtySent,L,rate,status)=>rows.push([cell(order.date),cell(VOUCHER_TYPE),cell(order.id),cell(buyer),cell(i.sku),i.origQty,qtySent,cell(L.unit),L.units,rate,L.base,L.cgst,L.sgst,L.total,cell(status)].join(","));
+    handled.filter(i=>i.status!=="unavailable").forEach(i=>{const rate=resolveRate(i.sku)||0;const L=billLine(i.sku,i.qty,rate,skuList,catList);push(i,i.qty,L,L.rate,i.status);});
+    handled.filter(i=>i.status==="unavailable").forEach(i=>{push(i,0,{unit:"",units:0,base:0,cgst:0,sgst:0,total:0},0,"N/A");});
+    const blob=new Blob([rows.join("\n")],{type:"text/csv"});
+    const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`order_${order.id}_tally.csv`;a.click();URL.revokeObjectURL(url);
+  };
+  // Tally XML export — DRAFT Sales-voucher structure for manual import validation
+  // (Phase 2 step 1: validate the shape in Tally before building the push bridge).
+  const exportTallyXml=()=>{
+    const esc=s=>String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    const buyer=order.sections.map(s=>s.name).join(" / ");
+    const billItems=handled.filter(i=>i.status!=="unavailable");
+    const vchDate=(order.date||"").replace(/-/g,""); // YYYYMMDD
+    let cgstTot=0,sgstTot=0;
+    const lines=billItems.map(i=>{
+      const rate=resolveRate(i.sku)||0;const L=billLine(i.sku,i.qty,rate,skuList,catList);cgstTot+=L.cgst;sgstTot+=L.sgst;
+      return `          <ALLINVENTORYENTRIES.LIST>
+            <STOCKITEMNAME>${esc(i.sku)}</STOCKITEMNAME>
+            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+            <ACTUALQTY>${L.units}</ACTUALQTY>
+            <BILLEDQTY>${L.units}</BILLEDQTY>
+            <RATE>${L.rate}</RATE>
+            <AMOUNT>${L.base}</AMOUNT>
+          </ALLINVENTORYENTRIES.LIST>`;
+    }).join("\n");
+    // GST ledger names must match your Tally exactly — set via CGST_LEDGER / SGST_LEDGER above.
+    const gstLines=(cgstTot+sgstTot)>0?`
+          <LEDGERENTRIES.LIST><LEDGERNAME>${esc(CGST_LEDGER)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${cgstTot.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>
+          <LEDGERENTRIES.LIST><LEDGERNAME>${esc(SGST_LEDGER)}</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>${sgstTot.toFixed(2)}</AMOUNT></LEDGERENTRIES.LIST>`:"";
+    const xml=`<ENVELOPE>
+  <HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME></REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+          <VOUCHER VCHTYPE="${VOUCHER_TYPE}" ACTION="Create">
+            <DATE>${vchDate}</DATE>
+            <VOUCHERTYPENAME>${VOUCHER_TYPE}</VOUCHERTYPENAME>
+            <REFERENCE>${esc(order.id)}</REFERENCE>
+            <PARTYLEDGERNAME>${esc(buyer)}</PARTYLEDGERNAME>
+            <NARRATION>${esc("OrderFlow "+order.id+(order.notes?" · "+order.notes:""))}</NARRATION>
+${lines}${gstLines}
+          </VOUCHER>
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>`;
+    const blob=new Blob([xml],{type:"application/xml"});
+    const url=URL.createObjectURL(blob);const a=document.createElement("a");a.href=url;a.download=`order_${order.id}_tally.xml`;a.click();URL.revokeObjectURL(url);
+  };
+
+  if(editMode)return <EditOrderScreen
+    order={order}
+    skuList={skuList}
+    onCancel={()=>setEditMode(false)}
+    onSave={sections=>{onUpdate(-1,-1,{_fullReplace:sections});setEditMode(false);}}
+  />;
+
+  return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg,position:"relative"}}>
+    <div style={{padding:"14px 20px",borderBottom:`1px solid ${C.border}`,background:"#fff"}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+        <button onClick={onBack} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:22,lineHeight:1,padding:0}}>←</button>
+        <div style={{fontFamily:C.mono,fontWeight:700,fontSize:14,background:idBg,color:idC,border:`1px solid ${idBd}`,borderRadius:6,padding:"2px 10px"}}>{order.id}</div>
+        <div style={{flex:1}}>
+          <div style={{fontSize:13,fontWeight:600,color:C.text}}>{order.sections.map(s=>s.name).join(" · ")}</div>
+          <div style={{fontSize:11,color:C.textDim}}>{fmtDate(order.date)} · {order.scannedAt}{isBilled&&<span style={{color:C.blue,marginLeft:6}}>· Billed</span>}{isProcessed&&<span style={{color:C.indigo,marginLeft:6}}>· Processed</span>}</div>
+        </div>
+        {!isBilled&&!isProcessed&&<button onClick={()=>setEditMode(true)} style={{background:C.grayBg,border:`1px solid ${C.borderMd}`,borderRadius:7,padding:"5px 10px",cursor:"pointer",color:C.textDim,fontSize:11,fontFamily:C.sans,fontWeight:600,flexShrink:0}}>✏️ Edit Order</button>}
+        {isAdmin&&<span style={{fontFamily:C.mono,fontSize:10,fontWeight:700,background:C.amberBg,color:C.amber,border:`1px solid ${C.amberBd}`,borderRadius:4,padding:"2px 6px"}}>ADMIN</span>}
+        {!isAdmin&&setLang&&<LangToggle lang={lang} setLang={setLang}/>}
+      </div>
+      <PBar pct={pct} ready={ready}/>
+      <div style={{fontSize:11,color:C.textDim,marginTop:5}}>{handled.length}/{all.length} handled · {pending.length} remaining</div>
+    </div>
+
+    <div style={{flex:1,overflowY:"auto",padding:"14px 20px 100px"}}>
+      {/* Order notes callout — editable */}
+      <OrderNotesCallout notes={order.notes} onSave={v=>onUpdate(-1,-1,{_notes:v})} lang={lang}/>
+      {pending.length>0&&<>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:10}}>{t.pending} ({pending.length})</div>
+        {order.sections.map((sec,sIdx)=>{
+          const secPending=sec.items.filter(i=>i.status==="pending");
+          if(!secPending.length)return null;
+          return <div key={sIdx} style={{marginBottom:16}}>
+            {/* Editable section name */}
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+              {editingSec===sIdx?<div style={{display:"flex",gap:6,flex:1}}>
+                <input value={secName} onChange={e=>setSecName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveSectionName(sIdx)} autoFocus style={{flex:1,padding:"4px 8px",borderRadius:6,border:`1px solid ${C.amber}`,fontFamily:C.sans,fontSize:13,outline:"none"}}/>
+                <button onClick={()=>saveSectionName(sIdx)} style={{padding:"4px 8px",borderRadius:6,border:"none",background:C.green,color:"#fff",cursor:"pointer",fontSize:12}}>✓</button>
+                <button onClick={()=>setEditingSec(null)} style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:12}}>✕</button>
+              </div>:<>
+                <span style={{color:C.amber}}>§</span>
+                <span style={{fontSize:11,fontWeight:700,letterSpacing:"0.8px",color:C.textDim}}>{sec.name.toUpperCase()}</span>
+                {!isBilled&&<button onClick={()=>{setEditingSec(sIdx);setSecName(sec.name);}} style={{padding:"2px 7px",borderRadius:5,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:10}}>Edit</button>}
+              </>}
+            </div>
+            {secPending.map(item=>{
+              const[sI,iI]=findIdx(item);const key=`${sI}-${iI}`;const isOpen=expandedKey===key;
+              const editingThis=editingItemSku&&editingItemSku.sIdx===sI&&editingItemSku.iIdx===iI;
+              return <div key={item.id} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,marginBottom:8,overflow:"hidden",boxShadow:"0 1px 2px rgba(0,0,0,0.05)"}}>
+                <div style={{padding:"12px 14px"}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:isOpen?0:10}}>
+                    {editingThis?<div style={{display:"flex",gap:6,flex:1,marginRight:8,alignItems:"center"}}>
+                      <SkuTypeahead value={itemSkuVal} onChange={v=>setItemSkuVal(v)} onSelect={(id,isCustom)=>saveItemSkuCustom(sI,iI,id,isCustom)} skuList={skuList} autoFocus style={{flex:1}}/>
+                      <button onClick={()=>saveItemSku(sI,iI)} style={{padding:"4px 8px",borderRadius:6,border:"none",background:C.green,color:"#fff",cursor:"pointer",fontSize:12,flexShrink:0}}>✓</button>
+                      <button onClick={()=>setEditingItemSku(null)} style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:12,flexShrink:0}}>✕</button>
+                    </div>:<div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:item.custom?C.indigo:C.text}}>{item.sku}{item.custom&&<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px",marginLeft:6,color:C.indigo}}>CUSTOM</span>}</span>
+                      <button onClick={()=>{setEditingItemSku({sIdx:sI,iIdx:iI});setItemSkuVal(item.sku);}} style={{padding:"2px 7px",borderRadius:5,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:10}}>Edit SKU</button>
+                    </div>}
+                    <span style={{fontFamily:C.mono,fontSize:13,color:C.textDim,fontWeight:600,flexShrink:0}}>×{item.origQty}</span>
+                  </div>
+                  {!isOpen&&<div style={{display:"flex",gap:7}}>
+                    <Btn onClick={()=>setStatus(sI,iI,"fulfilled")}   color="greenO" sx={{flex:1,padding:"12px 6px",fontSize:13,borderRadius:9,minHeight:44}}>{t.fulfilled}</Btn>
+                    <Btn onClick={()=>setStatus(sI,iI,"unavailable")} color="redO"   sx={{flex:1,padding:"12px 6px",fontSize:13,borderRadius:9,minHeight:44}}>{t.unavailable}</Btn>
+                    <Btn onClick={()=>openOverride(key,item)} color="amberO" sx={{padding:"12px 14px",fontSize:13,borderRadius:9,minHeight:44}}>{t.qty}</Btn>
+                  </div>}
+                </div>
+                {isOpen&&<div style={{borderTop:`1px solid ${C.border}`,padding:14,background:C.bg}}>
+                  <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:8}}>{lang==="hi"?"भेजने की मात्रा":"QUANTITY TO SEND"} <span style={{color:C.textFaint,fontFamily:C.mono,fontWeight:400}}>(req ×{item.origQty})</span></div>
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+                    <button onClick={()=>setEditQty(v=>String(Math.max(1,parseInt(v||1)-1)))} style={{width:40,height:40,borderRadius:8,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:20,color:C.textDim,fontFamily:C.sans}}>−</button>
+                    <input type="text" inputMode="numeric" value={editQty} onChange={e=>setEditQty(e.target.value.replace(/[^0-9]/g,""))} style={{width:76,padding:"8px 0",borderRadius:8,border:`1px solid ${C.amberBd}`,color:C.amber,fontFamily:C.mono,fontWeight:700,fontSize:22,textAlign:"center",background:"#fff",outline:"none"}}/>
+                    <button onClick={()=>setEditQty(v=>String(parseInt(v||0)+1))} style={{width:40,height:40,borderRadius:8,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontSize:20,color:C.textDim,fontFamily:C.sans}}>+</button>
+                    <button onClick={()=>setEditQty(String(item.origQty))} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:8,padding:"8px 10px",cursor:"pointer",color:C.textDim,fontSize:11,fontFamily:C.mono}}>Full ×{item.origQty}</button>
+                  </div>
+                  {(()=>{const q=parseInt(editQty);if(q>0&&q<item.origQty)return <div style={{fontSize:11,color:C.amber,marginBottom:10}}>Partial — sending {q} of {item.origQty}</div>;if(q>=item.origQty)return <div style={{fontSize:11,color:C.green,marginBottom:10}}>Fulfilled</div>;return <div style={{height:21,marginBottom:10}}/>;})()}
+                  <div style={{marginBottom:12}}>
+                    <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:5}}>NOTE (optional)</div>
+                    <input type="text" value={editNote} onChange={e=>setEditNote(e.target.value)} placeholder="e.g. 3 available, rest tomorrow" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <Btn onClick={()=>saveOverride(sI,iI,item.origQty)} color="amber" sx={{flex:1,padding:10}}>{t.save}</Btn>
+                    <Btn onClick={()=>setExpandedKey(null)} color="ghost" sx={{padding:"10px 16px"}}>{t.cancel}</Btn>
+                  </div>
+                </div>}
+              </div>;
+            })}
+          </div>;
+        })}
+      </>}
+
+      {pending.length===0&&!isBilled&&<div style={{background:C.greenBg,border:`1px solid ${C.greenBd}`,borderRadius:10,padding:16,textAlign:"center",marginBottom:16}}>
+        <div style={{fontSize:18,marginBottom:4}}>✓</div>
+        <div style={{fontWeight:700,color:C.green,fontSize:14}}>{t.allHandled}</div>
+        <div style={{fontSize:12,color:C.green,opacity:0.8,marginTop:2}}>{t.readyToBill}</div>
+      </div>}
+
+      {(isProcessed||isBilled)&&handled.length>0&&partyId==null&&<div style={{background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:10,padding:"11px 14px",marginBottom:12}}>
+        <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:2}}>Buyer not matched to a ledger</div>
+        <div style={{fontSize:11,color:C.textDim,marginBottom:8}}>Link this order to a client ledger to set &amp; save rates for billing.</div>
+        <BuyerTypeahead value={linkVal} onChange={v=>setLinkVal(v)} onSelect={b=>{setManualPartyId(b.id);setLinkVal(b.name);}} placeholder="Search ledger…" buyerList={buyerList}/>
+      </div>}
+      {(isProcessed||isBilled)&&manualPartyId!=null&&<div style={{background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:10,padding:"9px 14px",marginBottom:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+        <span style={{fontSize:12,color:C.indigo}}>Billing as <strong>{partyBuyer?partyBuyer.name:""}</strong> — rates save to this ledger.</span>
+        <button onClick={()=>{setManualPartyId(null);setLinkVal("");}} style={{background:"#fff",border:`1px solid ${C.indigoBd}`,borderRadius:6,padding:"3px 8px",cursor:"pointer",color:C.indigo,fontSize:11,flexShrink:0}}>Change</button>
+      </div>}
+
+      {handled.length>0&&<>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginTop:pending.length?20:4,marginBottom:10}}>{t.handled} ({handled.length})</div>
+        {Object.entries(byStaff).map(([name,items])=><div key={name} style={{marginBottom:16}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+            <div style={{width:24,height:24,borderRadius:12,background:C.grayBg,border:`1px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:C.textDim}}>{name[0]}</div>
+            <span style={{fontSize:12,fontWeight:600,color:C.textDim}}>{name}</span>
+          </div>
+          {items.map(item=>{
+            const[sI,iI]=findIdx(item);
+            const statusBg={fulfilled:C.greenBg,unavailable:C.redBg,partial:C.amberBg}[item.status]||"#fff";
+            const statusBd={fulfilled:C.greenBd,unavailable:C.redBd,partial:C.amberBd}[item.status]||C.border;
+            const editingThis=editingItemSku&&editingItemSku.sIdx===sI&&editingItemSku.iIdx===iI;
+            const rk=skuKey(item.sku);const rrate=resolveRate(item.sku)||0;const rL=billLine(item.sku,item.qty,rrate,skuList,catList);const rbuf=rateEdits[rk];const rInput=rbuf!==undefined?rbuf:(rrate>0?String(rrate):"");
+            return <div key={item.id} style={{background:statusBg,border:`1px solid ${statusBd}`,borderRadius:10,padding:"11px 14px",marginBottom:6}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                <div>
+                  {editingThis?<div style={{display:"flex",gap:6,marginBottom:4,alignItems:"center"}}>
+                    <SkuTypeahead value={itemSkuVal} onChange={v=>setItemSkuVal(v)} onSelect={(id,isCustom)=>{saveItemSkuCustom(sI,iI,id,isCustom);}} skuList={skuList} autoFocus style={{flex:1}}/>
+                    <button onClick={()=>saveItemSku(sI,iI)} style={{padding:"4px 8px",borderRadius:6,border:"none",background:C.green,color:"#fff",cursor:"pointer",fontSize:12,flexShrink:0}}>✓</button>
+                    <button onClick={()=>setEditingItemSku(null)} style={{padding:"4px 8px",borderRadius:6,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:12,flexShrink:0}}>✕</button>
+                  </div>:<span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:item.custom?C.indigo:C.text}}>{item.sku}{item.custom&&<span style={{fontFamily:C.mono,fontSize:9,fontWeight:700,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:3,padding:"1px 5px",marginLeft:6,color:C.indigo}}>CUSTOM</span>}</span>}
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginTop:4,flexWrap:"wrap"}}>
+                    <span style={{fontSize:11,color:C.textDim}}>Req <span style={{fontFamily:C.mono,fontWeight:600,color:C.text}}>×{item.origQty}</span></span>
+                    {item.qty!==item.origQty&&<span style={{fontSize:11,fontWeight:700,color:C.amber,fontFamily:C.mono,background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:4,padding:"1px 6px"}}>↳ Send ×{item.qty}</span>}
+                    {item.note&&<span style={{fontSize:11,color:C.textDim,fontStyle:"italic"}}>"{item.note}"</span>}
+                    {!editingThis&&(isProcessed||isBilled)&&<span style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.textDim}}>@ ₹<input type="text" inputMode="numeric" value={rInput} disabled={partyId==null} onChange={e=>{const v=e.target.value.replace(/[^0-9]/g,"");setRateEdits(p=>({...p,[rk]:v}));}} onBlur={()=>commitRate(item.sku)} onKeyDown={e=>{if(e.key==="Enter")e.target.blur();}} placeholder={rrate>0?String(rrate):"0"} title={partyId==null?"Buyer unmatched — can't save a rate":"Rate for this buyer — saved on blur"} style={{width:52,fontFamily:C.mono,fontWeight:700,fontSize:12,textAlign:"right",padding:"3px 6px",border:`1px solid ${C.borderMd}`,borderRadius:6,outline:"none",color:C.indigo,background:partyId==null?"#f5f5f5":"#fff"}}/>{rrate>0&&<span style={{fontFamily:C.mono,fontWeight:700,color:C.text}}>= ₹{rL.base.toLocaleString("en-IN")}</span>}</span>}
+                  </div>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexShrink:0}}>
+                  <Pill status={item.status}/>
+                  {/* Undo unrestricted */}
+                  {!isBilled&&<button onClick={()=>undoItem(sI,iI)} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:6,padding:"3px 8px",cursor:"pointer",color:C.textDim,fontSize:11,fontFamily:C.sans}} title="Undo">↩</button>}
+                  {!isBilled&&!editingThis&&<button onClick={()=>{setEditingItemSku({sIdx:sI,iIdx:iI});setItemSkuVal(item.sku);}} style={{padding:"3px 7px",borderRadius:5,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:10}}>Edit</button>}
+                </div>
+              </div>
+            </div>;
+          })}
+        </div>)}
+      </>}
+      {(isProcessed||isBilled)&&(()=>{let sub=0,gc=0,gs=0,any=false;handled.filter(i=>i.status!=="unavailable").forEach(i=>{const r=resolveRate(i.sku)||0;if(r>0)any=true;const L=billLine(i.sku,i.qty,r,skuList,catList);sub+=L.base;gc+=L.cgst;gs+=L.sgst;});if(!any)return null;return <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:16}}><div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.textDim,marginBottom:6}}><span>Subtotal</span><span style={{fontFamily:C.mono,color:C.text}}>₹{sub.toLocaleString("en-IN")}</span></div>{(gc>0||gs>0)&&<><div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.textDim,marginBottom:3}}><span>CGST 9%</span><span style={{fontFamily:C.mono}}>₹{gc.toLocaleString("en-IN")}</span></div><div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:C.textDim,marginBottom:6}}><span>SGST 9%</span><span style={{fontFamily:C.mono}}>₹{gs.toLocaleString("en-IN")}</span></div></>}<div style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderTop:`1px solid ${C.border}`,paddingTop:8}}><span style={{fontWeight:700,fontSize:13,color:C.text}}>Total</span><span style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.green}}>₹{(sub+gc+gs).toLocaleString("en-IN")}</span></div></div>;})()}
+    </div>
+
+    {/* Billing bar */}
+    {!isBilled&&!isProcessed&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 20px 16px",background:"#fff"}}>
+      {ready?<Btn onClick={onProcess||(() =>setBillingOpen(true))} color="green" sx={{width:"100%",padding:13,fontSize:14,gap:7,boxShadow:"0 2px 8px rgba(5,150,105,0.2)"}}>{onProcess?"💾 Save as Processed":t.sendToBilling}</Btn>
+        :<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"4px 0"}}>
+          <span style={{fontSize:13,color:C.textDim}}>{pending.length} {t.itemsPending}</span>
+          {isAdmin&&<Btn onClick={()=>setBillingOpen(true)} color="ghost" sx={{padding:"8px 14px",fontSize:12,gap:5}}>{t.billAnyway}</Btn>}
+        </div>}
+    </div>}
+    {isProcessed&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 20px 16px",background:"#fff",display:"flex",flexDirection:"column",gap:8}}>
+      <div style={{background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.indigo,marginBottom:4}}>{isAdmin?"✓ All fulfilled items processed. Ready to send to billing.":"✓ Order processed. Awaiting billing by admin."}</div>
+      {isAdmin&&<Btn onClick={()=>setBillingOpen(true)} color="green" sx={{width:"100%",padding:13,fontSize:14,gap:7}}>{t.sendToBilling}</Btn>}
+      <Btn onClick={()=>{if(window.confirm("Reopen as Live? All items will be marked unfulfilled."))onReopen();}} color="amberO" sx={{width:"100%",padding:11,fontSize:13,gap:6}}>{t.reopenLive}</Btn>
+    </div>}
+    {isBilled&&onReopen&&<div style={{borderTop:`1px solid ${C.border}`,padding:"12px 20px 16px",background:"#fff"}}>
+      <Btn onClick={()=>{if(window.confirm("Move this order back to Live? Billing record will be cleared."))onReopen();}} color="amberO" sx={{width:"100%",padding:11,fontSize:13,gap:6}}>{t.reopenLive}</Btn>
+    </div>}
+
+    {/* Billing modal with rates + Tally export */}
+    {billingOpen&&<div onClick={e=>{if(e.target===e.currentTarget)setBillingOpen(false);}} style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.4)",zIndex:100,display:"flex",flexDirection:"column",justifyContent:"flex-end"}}>
+      <div style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 28px",maxHeight:"85%",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>BILLING SUMMARY · {order.id}</span>
+          <button onClick={()=>setBillingOpen(false)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+        </div>
+        {pending.length>0&&<div style={{background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:10,padding:"10px 14px",marginBottom:14,fontSize:12,color:C.amber}}>⚠ {pending.length} items still pending — excluded from billing</div>}
+
+        <div style={{fontSize:11,fontWeight:700,color:C.green,letterSpacing:"0.8px",marginBottom:8}}>TO BILL</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr auto auto auto",gap:"0 12px",marginBottom:4}}>
+          {["SKU","Qty","Rate","Amount"].map(h=><span key={h} style={{fontSize:10,fontWeight:700,color:C.textDim,paddingBottom:6,borderBottom:`1px solid ${C.border}`}}>{h}</span>)}
+          {(() => {
+            let grandTotal=0,gstC=0,gstS=0;
+            const rows=handled.filter(i=>i.status!=="unavailable").map(item=>{
+              const k=skuKey(item.sku);
+              const globalRate=getRateForSku(item.sku,skuList,catList)||0;
+              const buf=rateEdits[k];
+              const rate=resolveRate(item.sku)||0;
+              const partySet=partyId!=null&&rate>0&&rate!==globalRate;
+              const inputVal=buf!==undefined?buf:(rate>0?String(rate):"");
+              const L=billLine(item.sku,item.qty,rate,skuList,catList);const amt=L.base;grandTotal+=amt;gstC+=L.cgst;gstS+=L.sgst;
+              return <React.Fragment key={item.id}>
+                <span style={{fontFamily:C.mono,fontSize:12,color:C.text,padding:"8px 0",borderBottom:`1px solid ${C.border}`}}>{item.sku}{item.qty!==item.origQty&&<span style={{fontSize:10,color:C.textDim,marginLeft:4}}>(req ×{item.origQty})</span>}</span>
+                <span style={{fontFamily:C.mono,fontSize:12,color:C.amber,fontWeight:700,padding:"8px 0",borderBottom:`1px solid ${C.border}`,textAlign:"right"}}>×{item.qty}</span>
+                <span style={{padding:"4px 0",borderBottom:`1px solid ${C.border}`,textAlign:"right"}}><input type="text" inputMode="numeric" value={inputVal} disabled={partyId==null} onChange={e=>{const v=e.target.value.replace(/[^0-9]/g,"");setRateEdits(p=>({...p,[k]:v}));}} onBlur={()=>commitRate(item.sku)} onKeyDown={e=>{if(e.key==="Enter")e.target.blur();}} placeholder={globalRate>0?String(globalRate):"—"} title={partyId==null?"Buyer unmatched — can't save a party rate":"Rate for this buyer — saved on blur"} style={{width:60,fontFamily:C.mono,fontSize:12,fontWeight:partySet||(buf!==undefined&&buf!=="")?700:400,color:partySet||(buf!==undefined&&buf!=="")?C.amber:C.text,textAlign:"right",padding:"5px 6px",border:`1px solid ${C.border}`,borderRadius:6,outline:"none",background:partyId==null?"#f5f5f5":"#fff"}}/></span>
+                <span style={{fontFamily:C.mono,fontSize:12,color:rate>0?C.text:C.textFaint,fontWeight:rate>0?700:400,padding:"8px 0",borderBottom:`1px solid ${C.border}`,textAlign:"right"}}>{rate>0?`₹${amt.toLocaleString("en-IN")}`:"—"}</span>
+              </React.Fragment>;
+            });
+            return <>{rows}{grandTotal>0&&<><span style={{fontFamily:C.mono,fontWeight:600,fontSize:12,color:C.textDim,padding:"10px 0 2px",gridColumn:"1/3"}}>SUBTOTAL</span><span/><span style={{fontFamily:C.mono,fontWeight:600,fontSize:12,color:C.text,padding:"10px 0 2px",textAlign:"right"}}>₹{grandTotal.toLocaleString("en-IN")}</span>{(gstC>0||gstS>0)&&<><span style={{fontFamily:C.mono,fontSize:11,color:C.textDim,padding:"2px 0",gridColumn:"1/3"}}>CGST 9%</span><span/><span style={{fontFamily:C.mono,fontSize:11,color:C.text,padding:"2px 0",textAlign:"right"}}>₹{gstC.toLocaleString("en-IN")}</span><span style={{fontFamily:C.mono,fontSize:11,color:C.textDim,padding:"2px 0",gridColumn:"1/3"}}>SGST 9%</span><span/><span style={{fontFamily:C.mono,fontSize:11,color:C.text,padding:"2px 0",textAlign:"right"}}>₹{gstS.toLocaleString("en-IN")}</span></>}<span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:C.text,padding:"6px 0 4px",gridColumn:"1/3"}}>TOTAL</span><span/><span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.green,padding:"6px 0 4px",textAlign:"right"}}>₹{(grandTotal+gstC+gstS).toLocaleString("en-IN")}</span></>}<span style={{gridColumn:"1/5",fontSize:10,color:C.textDim,paddingTop:8,lineHeight:1.45}}>{partyId!=null?<>Tap a rate to set it for <strong style={{color:C.text}}>{order.sections?.[0]?.name}</strong> — saved instantly &amp; reused next time. Blank = default rate.</>:"Buyer unmatched — rates use defaults and can't be saved to a party."}</span></>;
+          })()}
+        </div>
+
+        {handled.filter(i=>i.status==="unavailable").length>0&&<>
+          <div style={{fontSize:11,fontWeight:700,color:C.red,letterSpacing:"0.8px",marginTop:16,marginBottom:8}}>NOT AVAILABLE</div>
+          {handled.filter(i=>i.status==="unavailable").map(item=><div key={item.id} style={{display:"flex",justifyContent:"space-between",padding:"9px 0",borderBottom:`1px solid ${C.border}`,opacity:0.5}}>
+            <span style={{fontFamily:C.mono,fontSize:13,color:C.text,textDecoration:"line-through"}}>{item.sku}</span>
+            <span style={{fontFamily:C.mono,fontSize:13,color:C.red}}>×{item.origQty}</span>
+          </div>)}
+        </>}
+
+        <div style={{fontSize:11,color:C.textDim,padding:"10px 0 4px"}}>Billed by <strong style={{color:C.text}}>{actorName}</strong> · {nowTime()}</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:12}}>
+          <Btn onClick={()=>{setBillingOpen(false);onSendToBilling?onSendToBilling():onBilled();}} color="green" sx={{width:"100%",padding:13,fontSize:14}}>{t.confirmBilling}</Btn>
+          <Btn onClick={exportTally} color="ghost" sx={{width:"100%",padding:11,gap:6}}>{t.exportTally}</Btn>
+          <Btn onClick={exportTallyXml} color="ghost" sx={{width:"100%",padding:11,gap:6}}>{t.exportTallyXml}</Btn>
+          <Btn onClick={()=>setBillingOpen(false)} color="ghost" sx={{width:"100%",padding:11}}>{t.backToOrder}</Btn>
+        </div>
+      </div>
+    </div>}
+  </div>;
+}
+
+// ─── ANALYTICS TAB ────────────────────────────────────────────
+function AnalyticsTab({orders,users}){
+  const [glanceRange,setGlanceRange]=useState("today");
+  const billedAndHistorical=orders.filter(o=>o.status==="billed"||o.status==="historical");
+  const todayBilled=orders.filter(o=>o.status==="billed"&&o.date===TODAY);
+  const pendingOrdersList=orders.filter(o=>o.status==="pending-order");
+  const todayItems=todayBilled.flatMap(o=>allItems(o));
+  const todayDispatched=todayItems.filter(i=>i.status==="fulfilled"||i.status==="partial").reduce((s,i)=>s+i.qty,0);
+  const todayMissed=todayItems.filter(i=>i.status==="unavailable").reduce((s,i)=>s+i.origQty,0)+todayItems.filter(i=>i.status==="partial").reduce((s,i)=>s+(i.origQty-i.qty),0);
+  const hourBuckets={};
+  todayBilled.forEach(o=>{const hr=o.billedAt?parseInt(o.billedAt.split(":")[0]):null;if(hr!==null){hourBuckets[hr]=(hourBuckets[hr]||0)+1;}});
+  const hours=Array.from({length:13},(_,i)=>i+8);
+  const maxHourCount=Math.max(1,...hours.map(h=>hourBuckets[h]||0));
+  const weekDayNames=["Mon","Tue","Wed","Thu","Fri","Sat"];
+  const weekDayCounts=weekDayNames.map((_,i)=>{const d=new Date();const diff=i+1-d.getDay();const target=localDateISO(new Date(d.getTime()+diff*86400000));return billedAndHistorical.filter(o=>o.date===target).length;});
+  const maxWeekCount=Math.max(1,...weekDayCounts);
+  const last7Days=Array.from({length:7},(_,i)=>localDateISO(new Date(Date.now()-(6-i)*86400000)));
+  const fulfRateData=last7Days.map(date=>{
+    const items=billedAndHistorical.filter(o=>o.date===date).flatMap(o=>allItems(o));
+    const total=items.length;
+    if(total===0)return{date,fulfilled:0,partial:0,na:0,total:0};
+    return{date,fulfilled:Math.round(items.filter(i=>i.status==="fulfilled").length/total*100),partial:Math.round(items.filter(i=>i.status==="partial").length/total*100),na:Math.round(items.filter(i=>i.status==="unavailable").length/total*100),total};
+  });
+  const skuMissMap={};
+  billedAndHistorical.filter(o=>last7Days.includes(o.date)).forEach(o=>{allItems(o).forEach(item=>{if(item.status==="unavailable"||item.status==="partial"){const missed=item.status==="unavailable"?item.origQty:(item.origQty-item.qty);if(missed>0)skuMissMap[item.sku]=(skuMissMap[item.sku]||0)+missed;}});});
+  const topSkus=Object.entries(skuMissMap).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const maxSkuMiss=Math.max(1,...topSkus.map(([,v])=>v));
+  const staffMap={};
+  orders.filter(o=>o.date===TODAY).forEach(o=>{allItems(o).filter(i=>i.handledBy&&i.status!=="pending").forEach(item=>{if(!staffMap[item.handledBy])staffMap[item.handledBy]={name:item.handledBy,handled:0};staffMap[item.handledBy].handled++;});});
+  const staffData=Object.values(staffMap).sort((a,b)=>b.handled-a.handled);
+  const maxStaff=Math.max(1,...staffData.map(s=>s.handled));
+  const ageMap={"1 day":0,"2 days":0,"3+ days":0};
+  pendingOrdersList.forEach(o=>{const ageDays=Math.round((Date.now()-new Date(o.date).getTime())/86400000);if(ageDays<=1)ageMap["1 day"]++;else if(ageDays===2)ageMap["2 days"]++;else ageMap["3+ days"]++;});
+  const ageData=Object.entries(ageMap);
+  const maxAge=Math.max(1,...ageData.map(([,v])=>v));
+  const SHead=({label})=><div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:12,marginTop:4}}>{label}</div>;
+  return <>
+    <SHead label="TODAY AT A GLANCE"/>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:8,marginBottom:14}}>
+      {[[todayBilled.length,"Orders Billed",C.green],[todayDispatched,"Units Dispatched",C.amber],[todayMissed,"Units Missed",C.red],[pendingOrdersList.length,"Pending Carryover",C.indigo]].map(([v,l,c])=>
+        <div key={l} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px"}}>
+          <div style={{fontFamily:C.mono,fontWeight:700,fontSize:24,color:c}}>{v}</div>
+          <div style={{fontSize:10,color:C.textDim,marginTop:3,fontWeight:500}}>{l}</div>
+        </div>)}
+    </div>
+    <div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:14}}>
+      {[["today","Today (by hour)"],["week","This Week (by day)"]].map(([k,l])=>
+        <button key={k} onClick={()=>setGlanceRange(k)} style={{flex:1,padding:"6px 4px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:glanceRange===k?700:400,background:glanceRange===k?"#fff":"transparent",color:glanceRange===k?C.text:C.textDim,boxShadow:glanceRange===k?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>{l}</button>)}
+    </div>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      <div style={{fontSize:11,color:C.textDim,marginBottom:12,fontWeight:600}}>{glanceRange==="today"?"ORDERS BILLED BY HOUR":"ORDERS BILLED — THIS WEEK"}</div>
+      {glanceRange==="today"
+        ?<div style={{display:"flex",alignItems:"flex-end",gap:3,height:80}}>
+          {hours.map(h=>{const count=hourBuckets[h]||0;const bh=Math.max(4,Math.round((count/maxHourCount)*72));const isNow=new Date().getHours()===h;return <div key={h} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+            {count>0&&<div style={{fontSize:9,color:C.textDim,fontFamily:C.mono}}>{count}</div>}
+            <div style={{width:"100%",height:bh,background:isNow?C.amber:count>0?"#FCD34D":C.border,borderRadius:"3px 3px 0 0",opacity:count>0?1:0.4}}/>
+            <div style={{fontSize:8,color:isNow?C.amber:C.textDim,fontFamily:C.mono,fontWeight:isNow?700:400}}>{h}</div>
+          </div>;})}
+        </div>
+        :<div style={{display:"flex",alignItems:"flex-end",gap:6,height:80}}>
+          {weekDayNames.map((day,i)=>{const count=weekDayCounts[i];const bh=Math.max(4,Math.round((count/maxWeekCount)*72));const isToday=new Date().getDay()===i+1;return <div key={day} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+            {count>0&&<div style={{fontSize:9,color:C.textDim,fontFamily:C.mono}}>{count}</div>}
+            <div style={{width:"100%",height:bh,background:isToday?C.amber:count>0?"#FCD34D":C.border,borderRadius:"3px 3px 0 0",opacity:count>0?1:0.4}}/>
+            <div style={{fontSize:9,color:isToday?C.amber:C.textDim,fontWeight:isToday?700:400}}>{day}</div>
+          </div>;})}
+        </div>}
+    </div>
+    <SHead label="FULFILMENT RATE — LAST 7 DAYS"/>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      <div style={{display:"flex",gap:12,marginBottom:10}}>
+        {[["Fulfilled",C.green],["Partial",C.amber],["N/A",C.red]].map(([l,c])=><div key={l} style={{display:"flex",alignItems:"center",gap:4}}><div style={{width:8,height:8,borderRadius:2,background:c}}/><span style={{fontSize:10,color:C.textDim}}>{l}</span></div>)}
+      </div>
+      <div style={{display:"flex",alignItems:"flex-end",gap:4,height:90}}>
+        {fulfRateData.map(d=><div key={d.date} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+          <div style={{width:"100%",display:"flex",flexDirection:"column-reverse",height:75,gap:1}}>
+            {d.total>0?<>
+              <div style={{width:"100%",background:C.red,borderRadius:d.fulfilled===0&&d.partial===0?"3px 3px 0 0":"0",minHeight:d.na>0?3:0,height:`${d.na}%`}}/>
+              <div style={{width:"100%",background:C.amber,borderRadius:d.fulfilled===0?"3px 3px 0 0":"0",minHeight:d.partial>0?3:0,height:`${d.partial}%`}}/>
+              <div style={{width:"100%",background:C.green,borderRadius:"3px 3px 0 0",minHeight:d.fulfilled>0?3:0,height:`${d.fulfilled}%`}}/>
+            </>:<div style={{width:"100%",flex:1,background:C.border,borderRadius:"3px 3px 0 0",opacity:0.3}}/>}
+          </div>
+          <div style={{fontSize:8,color:C.textDim,textAlign:"center"}}>{d.date===TODAY?"Today":new Date(d.date).toLocaleDateString("en-IN",{day:"numeric",month:"short"})}</div>
+          {d.total>0&&<div style={{fontSize:8,fontFamily:C.mono,color:C.textDim,textAlign:"center",lineHeight:1.4}}>
+            <span style={{color:C.green}}>{d.fulfilled}%</span>
+            {d.partial>0&&<><br/><span style={{color:C.amber}}>{d.partial}%</span></>}
+            {d.na>0&&<><br/><span style={{color:C.red}}>{d.na}%</span></>}
+          </div>}
+        </div>)}
+      </div>
+      {fulfRateData.some(d=>d.total>0)&&<div style={{borderTop:`1px solid ${C.border}`,marginTop:14,paddingTop:12,display:"flex",gap:6,flexWrap:"wrap"}}>
+        {fulfRateData.filter(d=>d.total>0).map(d=>{
+          const fulfilledN=Math.round(d.total*d.fulfilled/100);
+          const partialN=Math.round(d.total*d.partial/100);
+          const naN=Math.round(d.total*d.na/100);
+          return <div key={d.date} style={{background:C.bg,borderRadius:8,padding:"8px 10px",fontSize:10,minWidth:80,flex:1}}>
+            <div style={{fontWeight:700,color:C.text,marginBottom:4,fontSize:10}}>{d.date===TODAY?"Today":new Date(d.date).toLocaleDateString("en-IN",{day:"numeric",month:"short"})}</div>
+            <div style={{color:C.textDim,marginBottom:2}}>{d.total} items</div>
+            <div style={{color:C.green}}>{fulfilledN} fulfilled</div>
+            {partialN>0&&<div style={{color:C.amber}}>{partialN} partial</div>}
+            {naN>0&&<div style={{color:C.red}}>{naN} N/A</div>}
+          </div>;
+        })}
+      </div>}
+    </div>
+    <SHead label="TOP UNFULFILLED SKUs — LAST 7 DAYS"/>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      {topSkus.length===0
+        ?<div style={{textAlign:"center",color:C.textFaint,padding:"24px 0",fontSize:13}}>No unfulfilled items in the last 7 days 🎉</div>
+        :topSkus.map(([sku,missed])=><div key={sku} style={{marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontFamily:C.mono,fontWeight:700,fontSize:12,color:C.text}}>{sku}</span>
+            <span style={{fontFamily:C.mono,fontSize:12,color:C.red,fontWeight:600}}>×{missed} missed</span>
+          </div>
+          <div style={{background:C.border,borderRadius:4,height:6,overflow:"hidden"}}>
+            <div style={{width:`${Math.round((missed/maxSkuMiss)*100)}%`,height:"100%",background:C.red,borderRadius:4,opacity:0.75}}/>
+          </div>
+        </div>)}
+    </div>
+    <SHead label="STAFF PERFORMANCE — TODAY"/>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      {staffData.length===0
+        ?<div style={{textAlign:"center",color:C.textFaint,padding:"24px 0",fontSize:13}}>No items handled yet today.</div>
+        :staffData.map(s=><div key={s.name} style={{marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+            <span style={{fontSize:13,fontWeight:600,color:C.text}}>{s.name}</span>
+            <span style={{fontFamily:C.mono,fontSize:12,color:C.amber,fontWeight:700}}>{s.handled} items</span>
+          </div>
+          <div style={{background:C.border,borderRadius:4,height:7,overflow:"hidden"}}>
+            <div style={{width:`${Math.round((s.handled/maxStaff)*100)}%`,height:"100%",background:C.amber,borderRadius:4}}/>
+          </div>
+        </div>)}
+    </div>
+    <SHead label="PENDING CARRYOVER — AGE"/>
+    <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:20}}>
+      {pendingOrdersList.length===0
+        ?<div style={{textAlign:"center",color:C.textFaint,padding:"24px 0",fontSize:13}}>No pending carryover orders.</div>
+        :<div style={{display:"flex",alignItems:"flex-end",gap:12,height:80,justifyContent:"center"}}>
+          {ageData.map(([label,count])=>{const barColor=label==="1 day"?C.amber:label==="2 days"?C.red:"#7F1D1D";return <div key={label} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+            <div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:barColor}}>{count}</div>
+            <div style={{width:"100%",height:count>0?Math.max(4,Math.round((count/maxAge)*68)):2,background:barColor,borderRadius:"4px 4px 0 0",opacity:count>0?0.85:0.2}}/>
+            <div style={{fontSize:10,color:C.textDim,textAlign:"center",lineHeight:1.3}}>{label}</div>
+          </div>;})}
+        </div>}
+    </div>
+  </>;
+}
+
+// ─── ADMIN APP ────────────────────────────────────────────────
+function AdminApp({orders,users,skuList,catList,onSignOut,onOrderUpdate,onOrderBilled,onOrderReopen,onOrderProcess,onOrderSendToBilling,onAddOrder,onUserChange,onDeleteOrder,onSkuChange,skuListEnriched,buyerList,onBuyerChange,buyerGroups,onBuyerGroupChange,onAddAlias,adminPassword,onAdminPasswordChange,onMoveToLive,partyRates={},onSetPartyRate,onSetSeriesPartyRate}){
+  const [tab,setTab]=useState("orders");
+  const [activeOId,setActiveOId]=useState(null);
+  const [expandSku,setExpandSku]=useState(null);
+  const [showAdd,setShowAdd]=useState(false);
+  const [newName,setNewName]=useState("");
+  const [scanning,setScanning]=useState(false);
+  const [editingUser,setEditingUser]=useState(null);
+  const [editUserName,setEditUserName]=useState("");
+  const [editUserPw,setEditUserPw]=useState("");
+  const [selectedOrders,setSelectedOrders]=useState(new Set());
+  const toggleOrderSelect=id=>setSelectedOrders(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;});
+  // SKU tab state
+  const [skuPage,setSkuPage]=useState("cats");
+  const [activeCat,setActiveCat]=useState(null);
+  const [skuSearch,setSkuSearch]=useState("");
+  const [activeSku,setActiveSku]=useState(null);
+  const [editSkuId,setEditSkuId]=useState("");
+  const [editSkuRate,setEditSkuRate]=useState("");
+  const [editSkuCat,setEditSkuCat]=useState("");
+  const [editSkuAliases,setEditSkuAliases]=useState([]);
+  const [newSkuAlias,setNewSkuAlias]=useState("");
+  const [showAddSku,setShowAddSku]=useState(false);
+  const [newSkuId,setNewSkuId]=useState("");
+  const [newSkuCat,setNewSkuCat]=useState("lam8");
+  const [newSkuRate,setNewSkuRate]=useState("");
+  // Buyers tab state
+  const [buyerSearch,setBuyerSearch]=useState("");
+  const [activeBuyer,setActiveBuyer]=useState(null);
+  const [editBuyerName,setEditBuyerName]=useState("");
+  const [editBuyerAlias,setEditBuyerAlias]=useState("");
+  const [editBuyerGroup,setEditBuyerGroup]=useState("");
+  const [showAddBuyer,setShowAddBuyer]=useState(false);
+  const [newBuyerName,setNewBuyerName]=useState("");
+  const [newBuyerGroup,setNewBuyerGroup]=useState("SD");
+  // Buyer groups (categories for buyers)
+  const [buyerGroupPage,setBuyerGroupPage]=useState("groups"); // groups | list
+  const [activeBuyerGroup,setActiveBuyerGroup]=useState(null);
+  const [showAddBuyerGroup,setShowAddBuyerGroup]=useState(false);
+  const [newGroupName,setNewGroupName]=useState("");
+  const [newGroupAbbr,setNewGroupAbbr]=useState("");
+  const [editingGroup,setEditingGroup]=useState(null);
+  const [editGroupName,setEditGroupName]=useState("");
+  const [editGroupAbbr,setEditGroupAbbr]=useState("");
+  // Master Data sub-nav
+  const [mdSection,setMdSection]=useState("users"); // users | skus | buyers
+  // Orders tab filter
+  const [orderFilter,setOrderFilter]=useState("live"); // live | pending-order | processed | billed
+  const [pendingView,setPendingView]=useState("party"); // party | sku
+  const [orderSearch,setOrderSearch]=useState("");
+  const [histSearch,setHistSearch]=useState("");
+  const [histDateFilter,setHistDateFilter]=useState("");
+
+  const activeOrder=orders.find(o=>o.id===activeOId);
+
+  const eSkus=skuListEnriched||skuList;
+  if(scanning)return <ScanScreen actorName="Admin" onBack={()=>setScanning(false)} onConfirm={o=>{onAddOrder(o);setScanning(false);}} skuList={eSkus} catList={catList} buyerList={buyerList} onAddAlias={onAddAlias} lang="en"/>;
+  if(activeOrder)return <OrderDetail order={activeOrder} actorName="Admin" isAdmin={true} onBack={()=>setActiveOId(null)} onUpdate={(sIdx,iIdx,changes)=>onOrderUpdate(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{onOrderBilled(activeOrder.id);setActiveOId(null);}} onReopen={()=>onOrderReopen(activeOrder.id)} onProcess={()=>onOrderProcess(activeOrder.id)} onSendToBilling={()=>{onOrderSendToBilling(activeOrder.id);setActiveOId(null);}} skuList={eSkus} catList={catList} buyerList={buyerList} partyRates={partyRates} onSetPartyRate={onSetPartyRate} onSetSeriesPartyRate={onSetSeriesPartyRate}/>;
+
+  const tabs=[["orders","📋 Orders"],["analytics","📊 Analytics"],["historical","🗂 History"],["masterdata","⚙️ Master Data"]];
+  const tabSt=a=>({flex:1,padding:"8px 4px",borderRadius:7,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:a?700:400,background:a?"#fff":"transparent",color:a?C.text:C.textDim,boxShadow:a?"0 1px 3px rgba(0,0,0,0.08)":"none"});
+  const today=orders.filter(o=>o.date===TODAY),older=orders.filter(o=>o.date!==TODAY);
+
+  // Filtered SKUs for SKU tab
+  const catSkus=activeCat?skuList.filter(s=>s.cat===activeCat.id):[];
+  const filteredSkus=catSkus.filter(s=>!skuSearch||s.id.toLowerCase().includes(skuSearch.toLowerCase())||(s.name||"").toLowerCase().includes(skuSearch.toLowerCase()));
+
+  return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg}}>
+    <div style={{padding:"14px 20px 12px",borderBottom:`1px solid ${C.border}`,background:"#fff"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+        <div>
+          <div><span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.amber,letterSpacing:1}}>ORDER</span><span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.gray,letterSpacing:1}}>FLOW</span> <span style={{fontFamily:C.mono,fontSize:11,fontWeight:700,background:C.amberBg,color:C.amber,border:`1px solid ${C.amberBd}`,borderRadius:4,padding:"2px 6px"}}>ADMIN</span></div>
+          <div style={{fontSize:11,color:C.textDim,marginTop:2}}>{new Date().toLocaleDateString("en-IN",{day:"numeric",month:"short",year:"numeric"})}</div>
+        </div>
+        <button onClick={onSignOut} style={{background:"#fff",border:`1px solid ${C.borderMd}`,borderRadius:8,padding:"5px 10px",cursor:"pointer",color:C.textDim,fontSize:11,fontFamily:C.sans}}>Sign out</button>
+      </div>
+      <div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`}}>
+        {tabs.map(([key,label])=><button key={key} onClick={()=>setTab(key)} style={tabSt(tab===key)}>{label}</button>)}
+      </div>
+    </div>
+
+    <div style={{flex:1,overflowY:"auto",padding:"16px 20px 40px"}}>
+
+      {/* ── ORDERS TAB ── */}
+      {tab==="orders"&&(()=>{
+        const liveOrders=fifo(orders.filter(o=>o.status==="live"));
+        const processedOrders=alpha(orders.filter(o=>o.status==="processed"));
+        const pendingOrdersList=fifo(orders.filter(o=>o.status==="pending-order"));
+        const billedOrders=fifo(orders.filter(o=>o.status==="billed"&&o.date===TODAY));
+        const baseFiltered=orderFilter==="processed"?processedOrders:orderFilter==="pending-order"?pendingOrdersList:orderFilter==="billed"?billedOrders:liveOrders;
+        const filteredOrders=orderSearch.trim()?baseFiltered.filter(o=>{const q=orderSearch.toLowerCase();return o.sections.some(s=>s.name.toLowerCase().includes(q)||s.items.some(i=>i.sku.toLowerCase().includes(q)));;}):baseFiltered;
+        const tileSt=(active,color)=>({background:"#fff",border:`2px solid ${active?color:C.border}`,borderRadius:10,padding:"8px 6px",textAlign:"center",cursor:"pointer",transition:"border-color .15s"});
+        const bulkSelected=Array.from(selectedOrders);
+        return <>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,flex:1}}>
+              {[[liveOrders.length,"Live Orders",C.amber,"live"],[pendingOrdersList.length,"Pending",C.red,"pending-order"],[processedOrders.length,"Dispatch",C.indigo,"processed"],[billedOrders.length,"Billed",C.green,"billed"]].map(([v,l,c,f])=><div key={l} onClick={()=>setOrderFilter(f)} style={tileSt(orderFilter===f,c)}>
+                <div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:c}}>{v}</div>
+                <div style={{fontSize:9,color:orderFilter===f?c:C.textDim,marginTop:1,fontWeight:orderFilter===f?700:400}}>{l}</div>
+              </div>)}
+            </div>
+            <Btn onClick={()=>setScanning(true)} color="amber" sx={{padding:"10px 14px",fontSize:12,flexShrink:0,whiteSpace:"nowrap"}}>+ New</Btn>
+          </div>
+          <input value={orderSearch} onChange={e=>setOrderSearch(e.target.value)} placeholder="Search by name or SKU…" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:10}}/>
+          {bulkSelected.length>0&&<div style={{display:"flex",alignItems:"center",gap:8,background:C.redBg,border:`1px solid ${C.redBd}`,borderRadius:10,padding:"10px 14px",marginBottom:10}}>
+            <span style={{flex:1,fontSize:13,color:C.red,fontWeight:600}}>{bulkSelected.length} order{bulkSelected.length>1?"s":""} selected</span>
+            <Btn onClick={()=>{if(window.confirm(`Delete ${bulkSelected.length} orders?`)){bulkSelected.forEach(id=>onDeleteOrder(id));setSelectedOrders(new Set());}}} color="danger" sx={{padding:"7px 12px",fontSize:12}}>🗑 Delete All</Btn>
+            <Btn onClick={()=>setSelectedOrders(new Set())} color="ghost" sx={{padding:"7px 10px",fontSize:12}}>✕ Clear</Btn>
+          </div>}
+          {orderFilter==="pending-order"&&<Seg size="sm" value={pendingView} onChange={setPendingView} options={[["party","👤 By Party"],["sku","📦 By SKU"]]}/>}
+          {orderFilter==="pending-order"&&pendingView==="sku"
+            ?<PendingSkuTab orders={orders} onUpdate={(orderId,sIdx,iIdx,changes)=>onOrderUpdate(orderId,sIdx,iIdx,changes)} source="pending-order" onMoveToLive={onMoveToLive} skuList={eSkus} catList={catList}/>
+            :<>{orderFilter==="processed"&&filteredOrders.length>0&&<div style={{background:C.indigoBg,border:`1px solid ${C.indigoBd}`,borderRadius:10,padding:"10px 14px",fontSize:12,color:C.indigo,marginBottom:12}}>🚚 Ready to dispatch — open an order and Send to Billing when it goes out.</div>}
+          {filteredOrders.length===0&&<EmptyState icon={orderFilter==="live"?"☀️":orderFilter==="processed"?"🚚":orderFilter==="billed"?"📄":"📋"} title={`No ${orderFilter==="processed"?"dispatch-ready":orderFilter==="pending-order"?"pending":orderFilter} orders.`}/>}
+          {filteredOrders.map(o=><div key={o.id} style={{display:"flex",alignItems:"flex-start",gap:8}}>
+            <input type="checkbox" checked={selectedOrders.has(o.id)} onChange={()=>toggleOrderSelect(o.id)} style={{marginTop:18,flexShrink:0,width:16,height:16,cursor:"pointer"}}/>
+            <div style={{flex:1}}><OrderCard order={o} onOpen={setActiveOId} onDelete={onDeleteOrder} onEdit={setActiveOId} onReopen={id=>onOrderReopen(id)} dim={o.status==="billed"||o.status==="processed"} buyerList={buyerList}/></div>
+          </div>)}</>}
+        </>;
+      })()}
+
+      {/* ── HISTORICAL TAB ── */}
+      {tab==="historical"&&(()=>{
+        const historical=orders.filter(o=>o.status==="historical"&&o.date>=YDAY);
+        // Get unique dates for date filter dropdown
+        const uniqueDates=[...new Set(historical.map(o=>o.date))].sort((a,b)=>b.localeCompare(a));
+        const filtered=historical.filter(o=>{
+          const q=histSearch.toLowerCase();
+          const matchSearch=!q||o.sections.some(s=>s.name.toLowerCase().includes(q)||s.items.some(i=>i.sku.toLowerCase().includes(q)));
+          const matchDate=!histDateFilter||o.date===histDateFilter;
+          return matchSearch&&matchDate;
+        });
+        const grouped=filtered.reduce((acc,o)=>{(acc[o.date]=acc[o.date]||[]).push(o);return acc;},{});
+        const dates=Object.keys(grouped).sort((a,b)=>b.localeCompare(a));
+        return <>
+          <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginBottom:12}}>HISTORICAL ORDERS ({historical.length})</div>
+          <input value={histSearch} onChange={e=>setHistSearch(e.target.value)} placeholder="Search by name, SKU…" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:8}}/>
+          <select value={histDateFilter} onChange={e=>setHistDateFilter(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}>
+            <option value="">All dates</option>
+            {uniqueDates.map(d=><option key={d} value={d}>{fmtDate(d)} ({d})</option>)}
+          </select>
+          {filtered.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"60px 0",fontSize:13}}>No historical orders{histSearch||histDateFilter?" matching filters":""}.{!histSearch&&!histDateFilter&&" Billed orders from previous days will appear here."}</div>}
+          {dates.map(d=><div key={d} style={{marginBottom:20}}>
+            <GrpLabel label={fmtDate(d)+" · "+grouped[d].length+" orders"} color={C.blue}/>
+            {grouped[d].map(o=><OrderCard key={o.id} order={o} onOpen={setActiveOId} onEdit={setActiveOId} onReopen={id=>onOrderReopen(id)} dim buyerList={buyerList}/>)}
+          </div>)}
+        </>;
+      })()}
+
+      {/* ── MASTER DATA TAB ── */}
+      {tab==="masterdata"&&<>
+        {/* Sub-nav */}
+        <div style={{display:"flex",gap:3,background:C.bg,borderRadius:8,padding:3,border:`1px solid ${C.border}`,marginBottom:16}}>
+          {[["users","👥 Users"],["skus","🏷 SKUs"],["buyers","👤 Buyers"]].map(([k,l])=><button key={k} onClick={()=>setMdSection(k)} style={{flex:1,padding:"7px 4px",borderRadius:6,border:"none",cursor:"pointer",fontFamily:C.sans,fontSize:11,fontWeight:mdSection===k?700:400,background:mdSection===k?"#fff":"transparent",color:mdSection===k?C.text:C.textDim,boxShadow:mdSection===k?"0 1px 3px rgba(0,0,0,0.08)":"none"}}>{l}</button>)}
+        </div>
+
+        {/* USERS SECTION */}
+        {mdSection==="users"&&<>
+          <AdminPasswordCard adminPassword={adminPassword} onAdminPasswordChange={onAdminPasswordChange}/>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>STAFF ({users.length})</div>
+            <Btn onClick={()=>setShowAdd(!showAdd)} color="amber" sx={{padding:"7px 12px",fontSize:12}}>+ Add Staff</Btn>
+          </div>
+          {showAdd&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+            <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW STAFF MEMBER</div>
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
+              <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="Staff name" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={()=>{if(!newName.trim()){alert("Enter a name.");return;}onUserChange("add",{id:Date.now(),name:newName.trim(),active:true,password:"6666",itemsHandled:0,ordersToday:0,lastSeen:"Never"});setNewName("");setShowAdd(false);}} color="green" sx={{flex:1,padding:10}}>Create Account</Btn>
+              <Btn onClick={()=>setShowAdd(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+            </div>
+          </div>}
+          {users.map(u=>{
+            const ac=u.active,c=ac?C.green:C.red,bg=ac?C.greenBg:C.redBg,bd=ac?C.greenBd:C.redBd;
+            return <div key={u.id} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",marginBottom:10,boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}>
+              <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+                <div style={{width:40,height:40,borderRadius:20,background:bg,border:`1px solid ${bd}`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:16,color:c}}>{u.name[0]}</div>
+                <div style={{flex:1}}><div style={{fontWeight:700,fontSize:14,color:C.text}}>{u.name}</div><div style={{fontSize:11,color:C.textDim}}>Last seen: {u.lastSeen}</div></div>
+                <span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,padding:"3px 8px",borderRadius:4,background:bg,color:c,border:`1px solid ${bd}`}}>{ac?"ACTIVE":"INACTIVE"}</span>
+              </div>
+              <div style={{display:"flex",gap:6,paddingTop:10,borderTop:"1px solid #F3F4F6"}}>
+                <div style={{flex:1,textAlign:"center"}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.text}}>{u.itemsHandled}</div><div style={{fontSize:10,color:C.textDim}}>items today</div></div>
+                <div style={{flex:1,textAlign:"center",borderLeft:"1px solid #F3F4F6"}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.text}}>{u.ordersToday}</div><div style={{fontSize:10,color:C.textDim}}>orders today</div></div>
+                <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"flex-end",gap:6,borderLeft:"1px solid #F3F4F6",paddingLeft:8}}>
+                  <Btn onClick={()=>{setEditingUser(u);setEditUserName(u.name);setEditUserPw(u.password||"6666");}} color="ghost" sx={{padding:"5px 10px",fontSize:11}}>Edit</Btn>
+                  <Btn onClick={()=>onUserChange("toggle",u.id)} color={ac?"redO":"greenO"} sx={{padding:"5px 10px",fontSize:11}}>{ac?"Deactivate":"Activate"}</Btn>
+                </div>
+              </div>
+            </div>;
+          })}
+          {editingUser&&<div onClick={e=>{if(e.target===e.currentTarget)setEditingUser(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT STAFF</span>
+                <button onClick={()=>setEditingUser(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
+                <input value={editUserName} onChange={e=>setEditUserName(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>PASSWORD</div>
+                <input value={editUserPw} onChange={e=>setEditUserPw(e.target.value)} placeholder="6666" style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,letterSpacing:2,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{if(!editUserName.trim()){alert("Name cannot be empty.");return;}if(!editUserPw.trim()){alert("Password cannot be empty.");return;}onUserChange("edit",{...editingUser,name:editUserName.trim(),password:editUserPw.trim()});setEditingUser(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save</Btn>
+                <Btn onClick={()=>{if(window.confirm(`Delete ${editingUser.name}? This cannot be undone.`)){onUserChange("delete",editingUser.id);setEditingUser(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
+              </div>
+            </div>
+          </div>}
+        </>}
+
+        {/* SKUS SECTION */}
+        {mdSection==="skus"&&<>
+          {skuPage==="cats"&&<>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>SKU CATEGORIES ({catList.length})</div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>setShowAddSku(!showAddSku)} color="ghost" sx={{padding:"6px 12px",fontSize:11}}>+ Add SKU</Btn>
+                <Btn onClick={()=>{setShowAddSku(false);setSkuPage("addcat");}} color="amber" sx={{padding:"6px 12px",fontSize:11}}>+ Category</Btn>
+              </div>
+            </div>
+            {showAddSku&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW SKU</div>
+              <div style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>SKU CODE</div>
+                <input value={newSkuId} onChange={e=>setNewSkuId(e.target.value)} placeholder="e.g. HG 9999" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>CATEGORY</div>
+                <select value={newSkuCat} onChange={e=>setNewSkuCat(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}>
+                  {catList.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>RATE (Rs)</div>
+                <input type="number" value={newSkuRate} onChange={e=>setNewSkuRate(e.target.value)} placeholder="Enter rate" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{if(!newSkuId.trim()){alert("Enter a SKU code.");return;}const sku={id:newSkuId.trim().toUpperCase(),cat:newSkuCat,rate:newSkuRate?parseInt(newSkuRate):undefined};onSkuChange("add",sku);setNewSkuId("");setNewSkuRate("");setShowAddSku(false);}} color="green" sx={{flex:1,padding:10}}>Add SKU</Btn>
+                <Btn onClick={()=>setShowAddSku(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              </div>
+            </div>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {catList.map(cat=>{
+                const count=skuList.filter(s=>s.cat===cat.id).length;
+                return <div key={cat.id} onClick={()=>{setActiveCat(cat);setSkuSearch("");setSkuPage("list");}}
+                  style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",cursor:"pointer",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                  <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:4,lineHeight:1.3}}>{cat.name}</div>
+                  <div style={{fontSize:11,color:C.textDim}}>Rs{cat.rate?.toLocaleString("en-IN")||"--"} default · {count} SKUs</div>
+                </div>;
+              })}
+            </div>
+          </>}
+          {skuPage==="addcat"&&<>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:16}}>
+              <button onClick={()=>setSkuPage("cats")} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:0,lineHeight:1}}>←</button>
+              <span style={{fontWeight:700,fontSize:15,color:C.text}}>New SKU Category</span>
+            </div>
+            <div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16}}>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>CATEGORY NAME</div>
+                <input value={newGroupName} onChange={e=>setNewGroupName(e.target.value)} placeholder="e.g. 2mm Board" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>DEFAULT RATE (Rs)</div>
+                <input type="number" value={newSkuRate} onChange={e=>setNewSkuRate(e.target.value)} placeholder="e.g. 800" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{
+                  if(!newGroupName.trim()){alert("Enter a category name.");return;}
+                  const id=newGroupName.trim().toLowerCase().replace(/[^a-z0-9]/g,"");
+                  dbSet(ref(db,"categories/"+id),{id,name:newGroupName.trim(),rate:newSkuRate?parseInt(newSkuRate):0});
+                  setNewGroupName("");setNewSkuRate("");setSkuPage("cats");
+                }} color="green" sx={{flex:1,padding:10}}>Create Category</Btn>
+                <Btn onClick={()=>setSkuPage("cats")} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              </div>
+            </div>
+          </>}
+          {skuPage==="list"&&activeCat&&<>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+              <button onClick={()=>{setSkuPage("cats");setSkuSearch("");}} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:0,lineHeight:1}}>←</button>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:15,color:C.text}}>{activeCat.name}</div>
+                <div style={{fontSize:11,color:C.textDim}}>Rs{activeCat.rate?.toLocaleString("en-IN")||"--"} default · {skuList.filter(s=>s.cat===activeCat.id).length} SKUs</div>
+              </div>
+              <Btn onClick={()=>{
+                const count=skuList.filter(s=>s.cat===activeCat.id).length;
+                if(count>0){alert("Cannot delete -- "+count+" SKU"+(count>1?"s":"")+" in this category. Move or delete them first.");return;}
+                if(window.confirm("Delete category "+activeCat.name+"?")){dbRemove(ref(db,"categories/"+activeCat.id));setSkuPage("cats");}
+              }} color="danger" sx={{padding:"6px 10px",fontSize:11}}>Delete Category</Btn>
+            </div>
+            <input value={skuSearch} onChange={e=>setSkuSearch(e.target.value)} placeholder={"Search in "+activeCat.name+"..."} style={{width:"100%",padding:"10px 14px",borderRadius:10,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:12}}/>
+            <div style={{fontSize:11,color:C.textDim,marginBottom:10}}>{filteredSkus.length} SKUs</div>
+            {filteredSkus.slice(0,150).map(sku=>{
+              const effectiveRate=sku.rate!==undefined?sku.rate:activeCat.rate;
+              return <div key={sku.id} onClick={()=>{setActiveSku(sku);setEditSkuId(sku.id);setEditSkuRate(String(sku.rate!==undefined?sku.rate:""));setEditSkuCat(sku.cat);setEditSkuAliases(sku.aliases||[]);setNewSkuAlias("");}}
+                style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:8,padding:"10px 14px",marginBottom:6,display:"flex",alignItems:"center",gap:12,cursor:"pointer"}}
+                onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+                onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                <div style={{flex:1}}><div style={{fontFamily:C.mono,fontWeight:600,fontSize:13,color:C.text}}>{sku.id}</div>{(sku.aliases||[]).length>0&&<div style={{fontSize:10,color:C.textDim,marginTop:2}}>Aliases: {(sku.aliases||[]).join(", ")}</div>}</div>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:13,color:sku.rate!==undefined?C.amber:C.textDim}}>Rs{effectiveRate?.toLocaleString("en-IN")||"--"}</span>
+                <span style={{color:C.textDim,fontSize:14}}>›</span>
+              </div>;
+            })}
+            {filteredSkus.length>150&&<div style={{textAlign:"center",color:C.textDim,fontSize:12,padding:"10px 0"}}>Showing 150 of {filteredSkus.length} -- type to search</div>}
+            {filteredSkus.length===0&&<div style={{textAlign:"center",color:C.textFaint,padding:"40px 0",fontSize:13}}>No SKUs found.</div>}
+          </>}
+          {activeSku&&<div onClick={e=>{if(e.target===e.currentTarget)setActiveSku(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT SKU</span>
+                <button onClick={()=>setActiveSku(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>SKU CODE</div>
+                <input value={editSkuId} onChange={e=>setEditSkuId(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>CATEGORY</div>
+                <select value={editSkuCat} onChange={e=>setEditSkuCat(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}>
+                  {catList.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>RATE (Rs per sheet)</div>
+                <input type="number" value={editSkuRate} onChange={e=>setEditSkuRate(e.target.value)} placeholder="Leave blank for category default" style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+               <div style={{fontSize:11,color:editSkuRate?C.amber:C.textDim,marginTop:4}}>{editSkuRate?"Custom rate overrides category default":"Blank = use category default"}</div>
+              </div>
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:6,fontWeight:600}}>ALIASES</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
+                  {editSkuAliases.map((a,i)=><span key={i} style={{display:"flex",alignItems:"center",gap:4,fontFamily:C.mono,fontSize:11,background:C.amberBg,border:`1px solid ${C.amberBd}`,borderRadius:6,padding:"3px 8px",color:C.amber}}>
+                    {a}<button onClick={()=>setEditSkuAliases(editSkuAliases.filter((_,j)=>j!==i))} style={{background:"none",border:"none",cursor:"pointer",color:C.amber,fontSize:12,padding:0,lineHeight:1,marginLeft:2}}>✕</button>
+                  </span>)}
+                  {editSkuAliases.length===0&&<span style={{fontSize:11,color:C.textFaint}}>No aliases yet</span>}
+                </div>
+                <div style={{display:"flex",gap:6}}>
+                  <input value={newSkuAlias} onChange={e=>setNewSkuAlias(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&newSkuAlias.trim()){const t=newSkuAlias.trim().toUpperCase();if(!editSkuAliases.includes(t))setEditSkuAliases([...editSkuAliases,t]);setNewSkuAlias("");}}} placeholder="e.g. HG-1102, HG1102…" style={{flex:1,padding:"8px 10px",borderRadius:7,border:`1px solid ${C.borderMd}`,fontSize:12,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff"}}/>
+                  <Btn onClick={()=>{const t=newSkuAlias.trim().toUpperCase();if(!t)return;if(!editSkuAliases.includes(t))setEditSkuAliases([...editSkuAliases,t]);setNewSkuAlias("");}} color="ghost" sx={{padding:"8px 12px",fontSize:11}}>Add</Btn>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{const updates={...activeSku,id:editSkuId.trim().toUpperCase(),cat:editSkuCat,aliases:editSkuAliases};if(editSkuRate)updates.rate=parseInt(editSkuRate);else delete updates.rate;if(updates.id!==activeSku.id)onSkuChange("delete",activeSku.id);onSkuChange("add",updates);setActiveSku(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
+                <Btn onClick={()=>{if(window.confirm("Delete "+activeSku.id+"?")){onSkuChange("delete",activeSku.id);setActiveSku(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
+              </div>
+            </div>
+          </div>}
+        </>}
+
+        {/* BUYERS SECTION */}
+        {mdSection==="buyers"&&<>
+          {buyerGroupPage==="groups"&&<>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>BUYER GROUPS ({buyerGroups.length})</div>
+              <Btn onClick={()=>setShowAddBuyerGroup(!showAddBuyerGroup)} color="amber" sx={{padding:"6px 12px",fontSize:11}}>+ Group</Btn>
+            </div>
+            {showAddBuyerGroup&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW BUYER GROUP</div>
+              <div style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>FULL NAME</div>
+                <input value={newGroupName} onChange={e=>setNewGroupName(e.target.value)} placeholder="e.g. Export Clients" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>ABBREVIATION</div>
+                <input value={newGroupAbbr} onChange={e=>setNewGroupAbbr(e.target.value.toUpperCase())} placeholder="e.g. EXP" maxLength={6} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{if(!newGroupName.trim()||!newGroupAbbr.trim()){alert("Enter both name and abbreviation.");return;}const id=newGroupAbbr.trim().toUpperCase();onBuyerGroupChange("add",{id,name:newGroupName.trim(),abbr:id});setNewGroupName("");setNewGroupAbbr("");setShowAddBuyerGroup(false);}} color="green" sx={{flex:1,padding:10}}>Create Group</Btn>
+                <Btn onClick={()=>setShowAddBuyerGroup(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              </div>
+            </div>}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              {buyerGroups.map(grp=>{
+                const count=buyerList.filter(b=>b.group===grp.id).length;
+                return <div key={grp.id} onClick={()=>{setActiveBuyerGroup(grp);setBuyerSearch("");setBuyerGroupPage("list");}}
+                  style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,padding:"14px 16px",cursor:"pointer",boxShadow:"0 1px 3px rgba(0,0,0,0.05)"}}
+                  onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+                  onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                  <div style={{fontWeight:700,fontSize:13,color:C.text,marginBottom:2}}>{grp.name}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:6,marginTop:6}}>
+                    <span style={{fontFamily:C.mono,fontSize:10,color:C.textDim,background:C.grayBg,border:`1px solid ${C.border}`,borderRadius:4,padding:"2px 6px"}}>{grp.abbr}</span>
+                    <span style={{fontSize:11,color:C.textDim}}>{count} buyers</span>
+                  </div>
+                </div>;
+              })}
+            </div>
+          </>}
+          {buyerGroupPage==="list"&&activeBuyerGroup&&<>
+            <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+              <button onClick={()=>{setBuyerGroupPage("groups");setBuyerSearch("");}} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20,padding:0,lineHeight:1}}>←</button>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:15,color:C.text}}>{activeBuyerGroup.name}</div>
+                <div style={{fontSize:11,color:C.textDim}}>{buyerList.filter(b=>b.group===activeBuyerGroup.id).length} buyers <span style={{fontFamily:C.mono}}>· {activeBuyerGroup.abbr}</span></div>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <Btn onClick={()=>{setEditingGroup(activeBuyerGroup);setEditGroupName(activeBuyerGroup.name);setEditGroupAbbr(activeBuyerGroup.abbr);}} color="ghost" sx={{padding:"6px 10px",fontSize:11}}>Edit</Btn>
+                <Btn onClick={()=>{const count=buyerList.filter(b=>b.group===activeBuyerGroup.id).length;if(count>0){alert("Cannot delete -- "+count+" buyer"+(count>1?"s":"")+" in this group. Move or delete them first.");return;}if(window.confirm("Delete group "+activeBuyerGroup.name+"?")){onBuyerGroupChange("delete",activeBuyerGroup.id);setBuyerGroupPage("groups");}}} color="danger" sx={{padding:"6px 10px",fontSize:11}}>Delete</Btn>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8,marginBottom:14}}>
+              <input value={buyerSearch} onChange={e=>setBuyerSearch(e.target.value)} placeholder="Search buyers..." style={{flex:1,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              <Btn onClick={()=>{setShowAddBuyer(true);setNewBuyerGroup(activeBuyerGroup.id);}} color="amber" sx={{padding:"9px 12px",fontSize:12,flexShrink:0}}>+ Buyer</Btn>
+            </div>
+            {showAddBuyer&&<div style={{background:"#fff",border:`1px solid ${C.amberBd}`,borderRadius:12,padding:16,marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.amber,marginBottom:12}}>NEW BUYER</div>
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>NAME</div>
+                <input value={newBuyerName} onChange={e=>setNewBuyerName(e.target.value)} placeholder="e.g. Mahavir Traders" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{if(!newBuyerName.trim()){alert("Enter a name.");return;}onBuyerChange("add",{id:Date.now(),name:newBuyerName.trim(),group:newBuyerGroup,aliases:[]});setNewBuyerName("");setShowAddBuyer(false);}} color="green" sx={{flex:1,padding:10}}>Add Buyer</Btn>
+                <Btn onClick={()=>setShowAddBuyer(false)} color="ghost" sx={{padding:"10px 14px"}}>Cancel</Btn>
+              </div>
+            </div>}
+            {buyerList.filter(b=>b.group===activeBuyerGroup.id&&(!buyerSearch||b.name.toLowerCase().includes(buyerSearch.toLowerCase())||(b.aliases||[]).some(a=>a.toLowerCase().includes(buyerSearch.toLowerCase())))).map(b=><div key={b.id}
+              onClick={()=>{setActiveBuyer(b);setEditBuyerName(b.name);setEditBuyerGroup(b.group);setEditBuyerAlias("");}}
+              style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between"}}
+              onMouseEnter={e=>e.currentTarget.style.borderColor=C.amberBd}
+              onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+              <div>
+                <div style={{fontSize:13,fontWeight:600,color:C.text}}>{b.name}</div>
+                {(b.aliases||[]).length>0&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>aka: {b.aliases.join(", ")}</div>}
+              </div>
+              <span style={{color:C.textDim,fontSize:14}}>›</span>
+            </div>)}
+          </>}
+          {editingGroup&&<div onClick={e=>{if(e.target===e.currentTarget)setEditingGroup(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,boxSizing:"border-box"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.text}}>EDIT GROUP</span>
+                <button onClick={()=>setEditingGroup(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>FULL NAME</div>
+                <input value={editGroupName} onChange={e=>setEditGroupName(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:20}}>
+                <div style={{fontSize:11,color:C.textDim,marginBottom:4,fontWeight:600}}>ABBREVIATION</div>
+                <input value={editGroupAbbr} onChange={e=>setEditGroupAbbr(e.target.value.toUpperCase())} maxLength={6} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <Btn onClick={()=>{onBuyerGroupChange("edit",{...editingGroup,name:editGroupName.trim(),abbr:editGroupAbbr.trim()});setActiveBuyerGroup({...editingGroup,name:editGroupName.trim(),abbr:editGroupAbbr.trim()});setEditingGroup(null);}} color="green" sx={{width:"100%",padding:12,fontSize:14}}>Save Changes</Btn>
+            </div>
+          </div>}
+          {activeBuyer&&<div onClick={e=>{if(e.target===e.currentTarget)setActiveBuyer(null);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#fff",borderRadius:"16px 16px 0 0",padding:"20px 20px 32px",width:"100%",maxWidth:480,maxHeight:"85vh",overflowY:"auto",boxSizing:"border-box"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                <span style={{fontFamily:C.mono,fontWeight:700,fontSize:14,color:C.text}}>EDIT BUYER</span>
+                <button onClick={()=>setActiveBuyer(null)} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,color:C.textDim,lineHeight:1}}>✕</button>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:4}}>CANONICAL NAME (English)</div>
+                <input value={editBuyerName} onChange={e=>setEditBuyerName(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.amberBd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:4}}>HINDI NAME (हिंदी नाम) — optional</div>
+                <input value={activeBuyer.hindiName||""} onChange={e=>{const updated={...activeBuyer,hindiName:e.target.value};setActiveBuyer(updated);}} placeholder="e.g. महावीर ट्रेडर्स" style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.blueBd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+                <div style={{fontSize:11,color:C.textDim,marginTop:3}}>Shown in Hindi mode · Also used as an alias for matching</div>
+              </div>
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:4}}>GROUP</div>
+                <select value={editBuyerGroup} onChange={e=>setEditBuyerGroup(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff"}}>
+                  {buyerGroups.map(g=><option key={g.id} value={g.id}>{g.name} · {g.abbr}</option>)}
+                </select>
+              </div>
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:8}}>ALIASES ({(activeBuyer.aliases||[]).length})</div>
+                {(activeBuyer.aliases||[]).map((alias,i)=><div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                  <span style={{flex:1,padding:"7px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,color:C.text,background:C.grayBg}}>{alias}</span>
+                  <button onClick={()=>{const updated={...activeBuyer,aliases:activeBuyer.aliases.filter((_,j)=>j!==i)};setActiveBuyer(updated);onBuyerChange("edit",updated);}} style={{padding:"6px 10px",borderRadius:7,border:`1px solid ${C.redBd}`,background:C.redBg,color:C.red,cursor:"pointer",fontSize:12}}>✕</button>
+                </div>)}
+                <div style={{display:"flex",gap:8,marginTop:8}}>
+                  <input value={editBuyerAlias} onChange={e=>setEditBuyerAlias(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&editBuyerAlias.trim()){const updated={...activeBuyer,aliases:[...(activeBuyer.aliases||[]),editBuyerAlias.trim()]};setActiveBuyer(updated);onBuyerChange("edit",updated);setEditBuyerAlias("");}}} placeholder="Add alias..." style={{flex:1,padding:"8px 10px",borderRadius:7,border:`1px solid ${C.border}`,fontSize:13,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff"}}/>
+                  <Btn onClick={()=>{if(!editBuyerAlias.trim())return;const updated={...activeBuyer,aliases:[...(activeBuyer.aliases||[]),editBuyerAlias.trim()]};setActiveBuyer(updated);onBuyerChange("edit",updated);setEditBuyerAlias("");}} color="amber" sx={{padding:"8px 12px",fontSize:12}}>Add</Btn>
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8}}>
+                <Btn onClick={()=>{const updated={...activeBuyer,name:editBuyerName.trim(),group:editBuyerGroup};onBuyerChange("edit",updated);setActiveBuyer(null);}} color="green" sx={{flex:1,padding:12,fontSize:14}}>Save Changes</Btn>
+                <Btn onClick={()=>{if(window.confirm("Delete "+activeBuyer.name+"?")){onBuyerChange("delete",activeBuyer.id);setActiveBuyer(null);}}} color="danger" sx={{padding:"12px 14px",fontSize:13}}>Delete</Btn>
+              </div>
+            </div>
+          </div>}
+        </>}
+      </>}
+
+      {/* ── ANALYTICS TAB ── */}
+      {tab==="analytics"&&<AnalyticsTab orders={orders} users={users}/>}
+    </div>
+  </div>;
+}
+
+// ─── ROOT APP ─────────────────────────────────────────────────
+// ─── OWNER APP (per-party folder rates + ledgers) ─────────────
+function OwnerApp({buyerList=[],catList=[],skuList=[],orders=[],partyRates={},onSetFolderRate,onSetSeriesPartyRate,onSetSeriesListRate,onBuyerChange,ownerPassword="6666",onOwnerPasswordChange,onSignOut}){
+  const [bucket,setBucket]=useState(null);
+  const [buyerId,setBuyerId]=useState(null);
+  const [search,setSearch]=useState("");
+  const [edits,setEdits]=useState({});
+  const [folderId,setFolderId]=useState(null);
+  const [pwEditing,setPwEditing]=useState(false);
+  const [pwVal,setPwVal]=useState("");
+  const [showAdd,setShowAdd]=useState(false); // add-ledger form open
+  const [addName,setAddName]=useState("");
+  const [addGroup,setAddGroup]=useState("SD");
+  const GROUP_OPTS=OWNER_BUCKETS.filter(b=>b.groups&&b.groups.length===1).map(b=>({label:b.label,group:b.groups[0]}));
+  const addLedger=()=>{
+    const nm=addName.trim();
+    if(!nm){alert("Enter a ledger name.");return;}
+    if(buyerList.some(b=>(b.name||"").trim().toLowerCase()===nm.toLowerCase())){alert("A ledger with that name already exists.");return;}
+    const id=Date.now(); // collision-safe (matches Admin add-buyer)
+    onBuyerChange&&onBuyerChange("add",{id,name:nm,group:addGroup,aliases:[]});
+    setShowAdd(false);setAddName("");setSearch("");setBuyerId(id); // jump into the new ledger to set rates
+  };
+  const grp=OWNER_BUCKETS.find(b=>b.id===bucket);
+  const buyer=buyerList.find(b=>b.id===buyerId);
+  const parties=grp?buyerList.filter(b=>grp.groups===null||grp.groups.includes(b.group)):[];
+  const back=()=>{if(folderId){setFolderId(null);setEdits({});}else if(buyerId){setBuyerId(null);setFolderId(null);setEdits({});}else if(bucket){setBucket(null);setSearch("");}else onSignOut();};
+  const folders=(buyer&&partyRates?.[buyer.id]?.folders)||{};
+  const cutoff=localDateISO(new Date(Date.now()-30*86400000));
+  const stocked=new Set();
+  if(buyer)orders.filter(o=>o.date>=cutoff).forEach(o=>o.sections?.forEach(s=>{if(s.name===buyer.name)s.items?.forEach(it=>{const sk=skuList.find(x=>x.id&&x.id.toUpperCase()===String(it.sku).toUpperCase());if(sk)stocked.add(sk.cat);});}));
+  const hdr=(title,sub)=><div style={{padding:"16px 20px 12px",borderBottom:`1px solid ${C.border}`,background:"#fff",display:"flex",alignItems:"center",gap:12}}><button onClick={back} style={{background:"none",border:"none",color:C.textDim,cursor:"pointer",fontSize:20}}>←</button><div style={{flex:1}}><div style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.indigo}}>{title}</div>{sub&&<div style={{fontSize:11,color:C.textDim,marginTop:2}}>{sub}</div>}</div></div>;
+  const dCat=(buyer&&folderId)?catList.find(x=>x.id===folderId):null;
+  const dFnode=dCat?(folders[folderId]||{}):{};
+  const dSeries=dCat?Object.entries(dCat.series||{}):[];
+  // % discounts only for Moulding + WPC; every other folder (incl. PVC) is flat ₹ only.
+  const allowPct=["moulding","wpc"].includes(folderId);
+  const dDisc=dFnode.disc,dDe=edits.disc,dMode=allowPct?(dDe?dDe.mode:(dDisc?.mode||"flat")):"flat",dVal=dDe?dDe.value:(dDisc!=null?String(dDisc.value):"");
+  // Compact summary for a folder row: saved folder discount, else saved per-series rates, else null.
+  const folderSummary=(c,fn)=>{
+    if(fn.disc&&fn.disc.value!=null&&fn.disc.value!==""){return fn.disc.mode==="flat"?`₹${fn.disc.value} off all series`:`${fn.disc.value}% off all series`;}
+    const es=fn.series?Object.entries(fn.series):[];
+    if(!es.length)return null;
+    const parts=es.map(([sid,r])=>{const s=c.series?.[sid];const eff=applyRateMode(r.mode,r.value,s?.rate);const v=eff!=null?`₹${eff}`:(r.mode==="pct"?`${r.value}% off`:r.mode==="flat"?`₹${r.value} off`:`₹${r.value}`);return `${s?.name||sid} ${v}`;});
+    return parts.slice(0,2).join(" · ")+(parts.length>2?` +${parts.length-2}`:"");
+  };
+  return <div style={{minHeight:620,display:"flex",flexDirection:"column",background:C.bg}}>
+    {!bucket&&<>
+      {/* 2026-07-22 redesign (Figma "05 · Owner Home"), relabelled Client rates */}
+      <div style={{padding:"18px 20px 14px",borderBottom:`1px solid ${C.border}`,background:"#fff",display:"flex",alignItems:"center",gap:12}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontFamily:C.mono,fontWeight:700,fontSize:15,color:C.indigo}}>CLIENT RATES</div>
+          <div style={{fontSize:11,color:C.textDim,marginTop:2}}>Per-party folder rates</div>
+        </div>
+        <button onClick={onSignOut} aria-label="Sign out" title="Sign out" style={{background:"none",border:"none",cursor:"pointer",padding:6,display:"flex",flexShrink:0}}><IconLogout/></button>
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:"16px 20px 26px",display:"flex",flexDirection:"column",gap:10}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.textDim,letterSpacing:"0.5px",marginBottom:2}}>LEDGER GROUPS</div>
+        {OWNER_BUCKETS.map(b=>{
+          const n=buyerList.filter(x=>b.groups===null||b.groups.includes(x.group)).length;
+          const glyph=b.groups===null?"∗":b.label.charAt(0).toUpperCase();
+          const sub=`${n.toLocaleString("en-IN")} ledgers${b.groups?" · "+b.groups.join(", "):""}`;
+          return <button key={b.id} onClick={()=>setBucket(b.id)} style={{display:"flex",alignItems:"center",gap:13,padding:15,borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans,textAlign:"left"}}>
+            <div style={{width:44,height:44,borderRadius:12,background:C.indigoBg,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,fontFamily:C.mono,fontWeight:700,fontSize:17,color:C.indigo}}>{glyph}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:600,fontSize:14,color:C.text}}>{b.label}</div>
+              <div style={{fontSize:11,color:C.textDim,marginTop:3}}>{sub}</div>
+            </div>
+            <div style={{fontFamily:C.mono,fontWeight:700,fontSize:18,color:C.textFaint,flexShrink:0}}>›</div>
+          </button>;
+        })}
+        <div style={{marginTop:"auto",background:"#fff",border:`1px solid ${C.indigoBd}`,borderRadius:12,padding:15}}>
+          <div style={{display:"flex",alignItems:"center",gap:13}}>
+            <div style={{width:44,height:44,borderRadius:12,background:C.indigoBg,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><IconSearch size={20}/></div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:11,fontWeight:600,color:C.indigo,letterSpacing:"0.3px"}}>CLIENT RATES PASSWORD</div>
+              <div style={{fontSize:11,color:C.textDim,marginTop:3}}>Separate from Admin · enters Client rates</div>
+            </div>
+            {!pwEditing&&<button onClick={()=>{setPwVal(String(ownerPassword||""));setPwEditing(true);}} style={{padding:"9px 14px",borderRadius:8,border:`1px solid ${C.borderMd}`,background:"#fff",color:C.textDim,cursor:"pointer",fontSize:13,fontFamily:C.sans,fontWeight:600,flexShrink:0}}>Change</button>}
+          </div>
+          {pwEditing&&<div style={{marginTop:12}}>
+            <input type="text" inputMode="numeric" value={pwVal} onChange={e=>setPwVal(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&pwVal.trim()){onOwnerPasswordChange(pwVal.trim());setPwEditing(false);}}} placeholder="New Client rates password" style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.mono,letterSpacing:2,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:8}}/>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>{if(!pwVal.trim()){alert("Password cannot be empty.");return;}onOwnerPasswordChange(pwVal.trim());setPwEditing(false);}} style={{flex:1,padding:10,borderRadius:8,border:"none",background:C.green,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>Save</button>
+              <button onClick={()=>setPwEditing(false)} style={{padding:"10px 14px",borderRadius:8,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,fontWeight:600,fontSize:13,cursor:"pointer"}}>Cancel</button>
+            </div>
+          </div>}
+        </div>
+      </div></>}
+    {/* 2026-07-22 redesign (Figma "06 · Owner Ledgers") */}
+    {bucket&&!buyer&&<>{hdr(grp.label,`${parties.length} ledgers${grp.groups?" · "+grp.groups.join(", ")+" group":""}`)}
+      <div style={{flex:1,overflowY:"auto",padding:"14px 20px 26px"}}>
+        <div style={{position:"relative",marginBottom:12}}>
+          <div style={{position:"absolute",left:14,top:"50%",transform:"translateY(-50%)",display:"flex",pointerEvents:"none"}}><IconSearch size={16} color={C.textDim}/></div>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search ledger…" style={{width:"100%",padding:"13px 12px 13px 40px",borderRadius:12,border:`1px solid ${C.border}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box"}}/>
+        </div>
+        {!showAdd&&<button onClick={()=>{setAddGroup(grp&&grp.groups&&grp.groups.length===1?grp.groups[0]:"SD");setAddName("");setShowAdd(true);}} style={{width:"100%",padding:"13px 12px",borderRadius:12,border:`1px dashed ${C.indigoBd}`,background:C.indigoBg,color:C.indigo,cursor:"pointer",fontSize:13,fontWeight:600,fontFamily:C.sans,marginBottom:12}}>+ Add new ledger</button>}
+        {showAdd&&<div style={{background:"#fff",border:`1px solid ${C.indigoBd}`,borderRadius:12,padding:15,marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.indigo,marginBottom:10}}>NEW LEDGER</div>
+          <input value={addName} onChange={e=>setAddName(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")addLedger();}} placeholder="Ledger / party name" autoFocus style={{width:"100%",padding:"11px 12px",borderRadius:8,border:`1px solid ${C.borderMd}`,fontSize:14,fontFamily:C.sans,outline:"none",color:C.text,background:"#fff",boxSizing:"border-box",marginBottom:10}}/>
+          <div style={{fontSize:11,fontWeight:600,color:C.textDim,marginBottom:6}}>GROUP</div>
+          <div style={{display:"flex",gap:8,marginBottom:12}}>
+            {GROUP_OPTS.map(o=><button key={o.group} onClick={()=>setAddGroup(o.group)} style={{flex:1,padding:"9px 6px",borderRadius:8,border:`1px solid ${addGroup===o.group?C.indigo:C.border}`,background:addGroup===o.group?C.indigoBg:"#fff",color:addGroup===o.group?C.indigo:C.textDim,cursor:"pointer",fontSize:12,fontWeight:addGroup===o.group?700:500,fontFamily:C.sans}}>{o.label}<span style={{display:"block",fontFamily:C.mono,fontSize:9,marginTop:2,opacity:0.8}}>{o.group}</span></button>)}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={addLedger} style={{flex:1,padding:11,borderRadius:8,border:"none",background:C.green,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>Add ledger</button>
+            <button onClick={()=>{setShowAdd(false);setAddName("");}} style={{padding:"11px 16px",borderRadius:8,border:`1px solid ${C.border}`,background:"#fff",color:C.textDim,fontWeight:600,fontSize:13,cursor:"pointer"}}>Cancel</button>
+          </div>
+          <div style={{fontSize:10,color:C.textDim,marginTop:10,lineHeight:1.5}}>Saved to the live ledger list. Add a Hindi name later in Admin → Master Data → Buyers if needed.</div>
+        </div>}
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {parties.filter(b=>!search.trim()||b.name.toLowerCase().includes(search.toLowerCase())).slice(0,400).map(b=>
+            <button key={b.id} onClick={()=>setBuyerId(b.id)} style={{display:"flex",alignItems:"center",gap:10,width:"100%",textAlign:"left",padding:"16px 15px",borderRadius:12,border:`1px solid ${C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans}}>
+              <span style={{fontSize:14,fontWeight:600,color:C.text}}>{b.name}</span>
+              {b.group&&<span style={{fontFamily:C.mono,fontSize:10,fontWeight:500,padding:"3px 7px",borderRadius:6,background:C.indigoBg,border:`1px solid ${C.indigoBd}`,color:C.indigo,flexShrink:0}}>{b.group}</span>}
+              <div style={{flex:1}}/>
+              <span style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:C.textFaint,flexShrink:0}}>›</span>
+            </button>
+          )}
+        </div>
+        {parties.length===0&&<EmptyState icon="📒" title="No ledgers in this bucket"/>}
+      </div></>}
+    {/* 2026-07-22 redesign (Figma "07 · Owner Folder list") — rows with a set rate get an
+        indigo border + indigo summary line (e.g. "₹700 off all series") + indigo chevron. */}
+    {buyer&&!folderId&&<>{hdr(buyer.name,`${buyer.group} · tap a folder to set rates`)}
+      <div style={{flex:1,overflowY:"auto",padding:"16px 20px 40px"}}>
+        <div style={{fontSize:11,fontWeight:600,color:C.textDim,letterSpacing:"0.5px",marginBottom:9}}>STOCKED FOLDERS · LAST 30 DAYS</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:18}}>{stocked.size===0?<span style={{fontSize:12,color:C.textFaint}}>No orders in last 30 days</span>:[...stocked].map(cid=>{const c=catList.find(x=>x.id===cid);return <span key={cid} style={{fontFamily:C.mono,fontSize:11,padding:"6px 12px",borderRadius:999,background:C.indigoBg,color:C.indigo,fontWeight:500}}>{c?c.name:cid}</span>;})}</div>
+        <div style={{fontSize:11,fontWeight:600,color:C.textDim,letterSpacing:"0.5px",marginBottom:9}}>FOLDERS · TAP TO SET RATES</div>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {catList.map(c=>{const fn=folders[c.id]||{};const nS=c.series?Object.keys(c.series).length:0;const sm=folderSummary(c,fn);const has=!!sm;
+            return <button key={c.id} onClick={()=>{setFolderId(c.id);setEdits({});}} style={{width:"100%",textAlign:"left",display:"flex",alignItems:"center",gap:10,padding:"15px 15px",borderRadius:12,border:`1px solid ${has?C.indigoBd:C.border}`,background:"#fff",cursor:"pointer",fontFamily:C.sans}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:14,fontWeight:600,color:C.text}}>{c.name}</div>
+                <div style={{fontSize:11,color:has?C.indigo:C.textDim,fontWeight:has?500:400,marginTop:3}}>{sm?sm:(c.partyPriced?"priced at billing":`${nS} series`)}</div>
+              </div>
+              <span style={{fontFamily:C.mono,fontWeight:700,fontSize:16,color:has?C.indigo:C.textFaint,flexShrink:0}}>›</span>
+            </button>;})}
+        </div>
+      </div></>}
+    {buyer&&folderId&&dCat&&<>{hdr(dCat.name,`${buyer.name} · ${buyer.group} · ${dCat.partyPriced?"party-priced":dSeries.length+" series"}`)}
+      <div style={{flex:1,overflowY:"auto",padding:"14px 20px 40px",display:"flex",flexDirection:"column",gap:8}}>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px"}}>OVERALL FOLDER DISCOUNT</div>
+        <div style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",padding:14,display:"flex",flexDirection:"column",gap:11}}>
+          <div style={{fontSize:12,color:C.textDim}}>Applies to every series below unless the series has its own rate.</div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <button onClick={()=>{if(allowPct)setEdits(p=>({...p,disc:{mode:dMode==="pct"?"flat":"pct",value:dVal}}));}} title={allowPct?"Toggle % / ₹":"Flat ₹ only for this folder"} style={{width:44,height:40,borderRadius:8,border:`1px solid ${allowPct?C.borderMd:C.border}`,background:allowPct?"#fff":C.grayBg,cursor:allowPct?"pointer":"default",fontWeight:700,color:allowPct?C.indigo:C.textDim,fontSize:14,flexShrink:0}}>{dMode==="flat"?"₹":"%"}</button>
+            <div style={{flex:1,display:"flex",alignItems:"center",gap:4,height:40,padding:"0 11px",border:`1px solid ${C.borderMd}`,borderRadius:8,background:"#fff"}}>
+              <span style={{fontFamily:C.mono,fontSize:13,color:C.textFaint}}>{dMode==="flat"?"₹":""}</span>
+              <input type="text" inputMode="numeric" value={dVal} onChange={ev=>{const nv=ev.target.value.replace(/[^0-9.]/g,"");setEdits(p=>({...p,disc:{mode:dMode,value:nv}}));}} onKeyDown={ev=>{if(ev.key==="Enter")onSetFolderRate(buyer.id,folderId,dVal===""?null:{mode:dMode,value:dVal});}} placeholder="0" style={{flex:1,width:"100%",fontFamily:C.mono,fontWeight:700,fontSize:13,padding:0,border:"none",outline:"none",color:C.text,background:"transparent"}}/>
+              <span style={{fontSize:11,color:C.textFaint}}>{dMode==="pct"?"% off":"off"}</span>
+            </div>
+            <button onClick={()=>onSetFolderRate(buyer.id,folderId,dVal===""?null:{mode:dMode,value:dVal})} style={{padding:"11px 20px",borderRadius:8,border:"none",background:C.indigo,color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer",flexShrink:0}}>Save</button>
+          </div>
+          {dDisc&&dDisc.value!=null&&dDisc.value!==""&&<div style={{display:"flex",alignItems:"center",gap:6,fontSize:11,fontWeight:600,color:C.green}}><span>✓</span><span style={{fontFamily:C.mono}}>Saved · {dDisc.mode==="flat"?`₹${dDisc.value} off`:`${dDisc.value}% off`} all {dSeries.length} series</span></div>}
+          {!allowPct&&<div style={{display:"flex",alignItems:"center",gap:7,padding:"9px 10px",borderRadius:7,background:C.amberBg,fontSize:11,color:C.amber,lineHeight:1.4}}><span>🔒</span><span>Flat ₹ only for this folder — % discounts apply to Moulding and WPC.</span></div>}
+        </div>
+        <div style={{fontSize:11,fontWeight:700,color:C.textDim,letterSpacing:"0.8px",marginTop:6}}>PER-SERIES · LIST ₹ · PARTY RATE</div>
+        {dSeries.length===0&&<div style={{fontSize:12,color:C.textFaint}}>No series in this folder.</div>}
+        {dSeries.map(([sid,s])=>{const pn=dFnode.series?.[sid];const pe=edits["p:"+sid];const pmodeRaw=pe?pe.mode:(pn?.mode||"abs");const pmode=(!allowPct&&pmodeRaw==="pct")?"flat":pmodeRaw;const pval=pe?pe.value:(pn!=null?String(pn.value):"");
+          const me=edits["m:"+sid];const mval=me!=null?me:(s.rate!=null?String(s.rate):"");const list=Number(mval)||null;const pv=Number(pval)||0;
+          const net=pval===""?null:(pmode==="abs"?pv:(list==null?null:Math.max(0,Math.round(pmode==="flat"?list-pv:list*(1-pv/100)))));
+          const discNet=(net==null&&dFnode.disc&&dFnode.disc.value!=null&&dFnode.disc.value!==""&&list!=null)?applyRateMode(dFnode.disc.mode,dFnode.disc.value,list):null;
+          const eff=net!=null?net:discNet;const srcTag=net!=null?(pmode==="abs"?"fixed · this party":pmode==="flat"?`₹${pval} off · this party`:`${pval}% off · this party`):(discNet!=null?"after folder disc":null);
+          return <div key={sid} style={{background:"#fff",border:`1px solid ${C.border}`,borderRadius:12,boxShadow:"0 1px 4px rgba(0,0,0,0.06)",padding:13,display:"flex",flexDirection:"column",gap:10}}>
+            <div style={{fontSize:14,fontWeight:600,color:C.text}}>{s.name}{s.delta?<span style={{fontSize:11,color:C.textDim,fontWeight:400}}> · +₹{s.delta} over base</span>:null}</div>
+            <div style={{display:"flex",gap:10}}>
+              <div style={{flex:1,display:"flex",flexDirection:"column",gap:5}}>
+                <span style={{fontFamily:C.mono,fontSize:9,fontWeight:600,color:C.textDim,letterSpacing:"0.5px"}}>LIST ₹ · ALL</span>
+                <div style={{display:"flex",alignItems:"center",gap:4,height:38,padding:"0 10px",border:`1px solid ${C.borderMd}`,borderRadius:8,background:"#fff"}}>
+                  <span style={{fontFamily:C.mono,fontSize:12,color:C.textFaint}}>₹</span>
+                  <input type="text" inputMode="numeric" value={mval} onChange={ev=>{const nv=ev.target.value.replace(/[^0-9.]/g,"");setEdits(p=>({...p,["m:"+sid]:nv}));}} onBlur={()=>onSetSeriesListRate(folderId,sid,mval)} onKeyDown={ev=>{if(ev.key==="Enter")ev.target.blur();}} placeholder={dCat.partyPriced?"—":"0"} style={{flex:1,width:"100%",fontFamily:C.mono,fontWeight:700,fontSize:13,padding:0,border:"none",outline:"none",color:C.text,background:"transparent"}}/>
+                </div>
+              </div>
+              <div style={{flex:1,display:"flex",flexDirection:"column",gap:5}}>
+                <span style={{fontFamily:C.mono,fontSize:9,fontWeight:600,color:C.textDim,letterSpacing:"0.5px"}}>THIS PARTY</span>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <button onClick={()=>setEdits(p=>({...p,["p:"+sid]:{mode:allowPct?(pmode==="abs"?"pct":pmode==="pct"?"flat":"abs"):(pmode==="abs"?"flat":"abs"),value:pval}}))} title="Toggle rate mode" style={{width:40,height:38,borderRadius:8,border:`1px solid ${C.indigoBd}`,background:C.indigoBg,cursor:"pointer",fontWeight:700,color:C.indigo,fontSize:12,flexShrink:0}}>{pmode==="abs"?"₹=":pmode==="flat"?"₹-":"%"}</button>
+                  <div style={{flex:1,display:"flex",alignItems:"center",height:38,padding:"0 10px",border:`1px solid ${C.borderMd}`,borderRadius:8,background:"#fff"}}>
+                    <input type="text" inputMode="numeric" value={pval} onChange={ev=>{const nv=ev.target.value.replace(/[^0-9.]/g,"");setEdits(p=>({...p,["p:"+sid]:{mode:pmode,value:nv}}));}} onBlur={()=>onSetSeriesPartyRate(buyer.id,folderId,sid,pval===""?null:{mode:pmode,value:pval})} onKeyDown={ev=>{if(ev.key==="Enter")ev.target.blur();}} placeholder="set" style={{flex:1,width:"100%",fontFamily:C.mono,fontWeight:700,fontSize:13,padding:0,border:"none",outline:"none",color:C.text,background:"transparent"}}/>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {eff!=null&&<div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 12px",borderRadius:8,background:net!=null?C.indigoBg:C.bg}}><span style={{fontFamily:C.mono,fontSize:9,fontWeight:600,color:C.textDim,letterSpacing:"0.5px"}}>PARTY PAYS</span><span style={{fontFamily:C.mono,fontSize:15,fontWeight:700,color:net!=null?C.indigo:C.text}}>₹{eff}</span><span style={{flex:1}}/>{srcTag&&<span style={{fontFamily:C.mono,fontSize:10,fontWeight:600,color:net!=null?C.indigo:C.textDim,padding:"3px 7px",borderRadius:6,background:"#fff",border:`1px solid ${net!=null?C.indigoBd:C.border}`}}>{srcTag}</span>}</div>}
+          </div>;})}
+        <div style={{fontSize:10,color:C.textDim,marginTop:4,lineHeight:1.5}}><strong>List ₹</strong> edits the master rate for everyone. Party toggle: <strong>₹=</strong> fixed{allowPct?<> · <strong>%</strong> off</>:null} · <strong>₹-</strong> ₹ off. A series rate overrides the folder discount. {allowPct?"":"Flat ₹ only for this folder. "}Saved instantly for {buyer.name}.</div>
+      </div></>}
+  </div>;
+}
+
+export default function App(){
+  const [screen,setScreen]=useState("choose");
+  const [staffId,setStaffId]=useState(null);
+  const [pendingAuth,setPendingAuth]=useState(null); // {type:"staff",user} | {type:"admin"}
+  const [activeOrderId,setActiveOrderId]=useState(null);
+  const [orders,setOrders]=useState([]);
+  const [users,setUsers]=useState([]);
+  const [skuList,setSkuList]=useState([]);
+  const [catList,setCatList]=useState([]);
+  const [buyerList,setBuyerList]=useState([]);
+  const [partyRates,setPartyRates]=useState({});
+  const [buyerGroups,setBuyerGroups]=useState([]);
+  const [adminPassword,setAdminPassword]=useState("6666");
+  const [ownerPassword,setOwnerPassword]=useState("6666");
+  const [loading,setLoading]=useState(true);
+  const [lang,setLang]=useState(()=>localStorage.getItem("of_lang")||"hi"); // Hindi default — shop-floor language (Admin stays English)
+  useEffect(()=>{localStorage.setItem("of_lang",lang);},[lang]);
+
+  useEffect(()=>{
+    // Orders listener
+    const ordersRef=ref(db,"orders");
+    let archiveTimer=null;
+    const unsubOrders=onValue(ordersRef,snap=>{
+      const val=snap.val();
+      if(val){
+        const loaded=purgeOldOrders(Object.values(val));
+        setOrders(loaded);
+        // Debounce archive to avoid racing with just-written billed orders
+        clearTimeout(archiveTimer);
+        archiveTimer=setTimeout(()=>{
+          const todayISO=localDateISO();
+          // Only archive billed orders from strictly previous days, never today
+          loaded.filter(o=>o.status==="billed"&&o.date&&o.date<todayISO).forEach(o=>{
+            dbSet(ref(db,`orders/${o.id}`),{...o,status:"historical"});
+          });
+        },2000);
+      }
+      else{setOrders([]);}
+      setLoading(false);
+    });
+    // Users listener
+    const usersRef=ref(db,"users");
+    const unsubUsers=onValue(usersRef,snap=>{
+      const val=snap.val();
+      if(val){setUsers(Object.values(val));}
+      else{SEED_USERS.forEach(u=>dbSet(ref(db,`users/${u.id}`),u));setUsers(SEED_USERS);}
+    });
+    // SKUs listener
+    const skusRef=ref(db,"skus");
+    const unsubSkus=onValue(skusRef,snap=>{
+      const val=snap.val();
+      if(val){setSkuList(Object.values(val));}
+      else{SEED_SKUS.forEach(s=>dbSet(ref(db,`skus/${s.id.replace(/[^a-zA-Z0-9]/g,"_")}`),s));setSkuList(SEED_SKUS);}
+    });
+    // Categories listener
+    const catsRef=ref(db,"categories");
+    const unsubCats=onValue(catsRef,snap=>{
+      const val=snap.val();
+      if(val){setCatList(Object.values(val));}
+      else{SKU_CATEGORIES.forEach(c=>dbSet(ref(db,`categories/${c.id}`),c));setCatList(SKU_CATEGORIES);}
+    });
+    // Buyers listener
+    const buyersRef=ref(db,"buyers");
+    const unsubBuyers=onValue(buyersRef,snap=>{
+      const val=snap.val();
+      if(val){setBuyerList(Object.values(val));}
+      else{SEED_BUYERS.forEach(b=>dbSet(ref(db,`buyers/${b.id}`),b));setBuyerList(SEED_BUYERS);}
+    });
+    // Buyer groups listener
+    const buyerGroupsRef=ref(db,"buyerGroups");
+    const unsubBuyerGroups=onValue(buyerGroupsRef,snap=>{
+      const val=snap.val();
+      if(val){setBuyerGroups(Object.values(val));}
+      else{SEED_BUYER_GROUPS.forEach(g=>dbSet(ref(db,`buyerGroups/${g.id}`),g));setBuyerGroups(SEED_BUYER_GROUPS);}
+    });
+    // Party rates listener — partyRates/{buyerId}/skus/{sanitizedSku}. No seed (live-only, like orders).
+    const partyRatesRef=ref(db,"partyRates");
+    const unsubPartyRates=onValue(partyRatesRef,snap=>{setPartyRates(snap.val()||{});});
+    // Admin password listener (settings/adminPassword, default 6666)
+    const adminPwRef=ref(db,"settings/adminPassword");
+    const unsubAdminPw=onValue(adminPwRef,snap=>{
+      const val=snap.val();
+      if(val===null||val===undefined){dbSet(ref(db,"settings/adminPassword"),"6666");setAdminPassword("6666");}
+      else{setAdminPassword(String(val));}
+    });
+    // Owner password listener (settings/ownerPassword, default 6666 — separate from admin)
+    const ownerPwRef=ref(db,"settings/ownerPassword");
+    const unsubOwnerPw=onValue(ownerPwRef,snap=>{const val=snap.val();if(val===null||val===undefined){dbSet(ref(db,"settings/ownerPassword"),"6666");setOwnerPassword("6666");}else{setOwnerPassword(String(val));}});
+    // Hourly purge
+    const purgeInterval=setInterval(()=>{
+      setOrders(prev=>{
+        const purged=purgeOldOrders(prev);
+        prev.filter(o=>!purged.find(p=>p.id===o.id)).forEach(o=>dbRemove(ref(db,`orders/${o.id}`)));
+        return purged;
+      });
+    },60*60*1000);
+    return()=>{unsubOrders();unsubUsers();unsubSkus();unsubCats();unsubBuyers();unsubBuyerGroups();unsubPartyRates();unsubAdminPw();unsubOwnerPw();clearInterval(purgeInterval);};
+  },[]);
+
+  const staffUser=users.find(u=>u.id===staffId);
+  const actorName=screen==="admin-app"?"Admin":(staffUser?.name||"Staff");
+  const isAdmin=screen==="admin-app";
+  const activeOrder=orders.find(o=>o.id===activeOrderId);
+  // Enrich skuList with category names for typeahead display (memoised — avoids
+  // re-mapping all ~817 SKUs on every root render)
+  const enrichedSkuList=React.useMemo(()=>skuList.map(s=>{const cat=catList.find(c=>c.id===s.cat);return{...s,_catName:cat?.name||""};}),[skuList,catList]);
+
+  // Mutations
+  const updateItem=(orderId,sIdx,iIdx,changes)=>{
+    const order=orders.find(o=>o.id===orderId);if(!order)return;
+    const updated=cl(order);
+    if(changes._sectionName){updated.sections[sIdx].name=changes._sectionName;}
+    else if(changes._notes!==undefined){updated.notes=changes._notes;}
+    else if(changes._fullReplace){
+      // Replace entire sections array (used by Edit Order mode)
+      updated.sections=changes._fullReplace;
+    }
+    else{Object.assign(updated.sections[sIdx].items[iIdx],changes);}
+    dbSet(ref(db,`orders/${orderId}`),updated);
+  };
+  const billOrder=orderId=>{const order=orders.find(o=>o.id===orderId);if(!order)return;dbSet(ref(db,`orders/${orderId}`),{...order,status:"billed",billedBy:actorName,billedAt:nowTime()});};
+  const processOrder=orderId=>{const order=orders.find(o=>o.id===orderId);if(!order)return;dbSet(ref(db,`orders/${orderId}`),{...order,status:"processed",processedAt:nowTime()});};
+  const reopenOrder=orderId=>{
+    const order=orders.find(o=>o.id===orderId);if(!order)return;
+    // Reset all items to pending when reopening from processed or pending-order
+    const u=cl(order);
+    u.sections=u.sections.map(sec=>({...sec,items:sec.items.map(item=>({...item,status:"pending",handledBy:null,note:item.note||""}))}));
+    u.status="live";delete u.billedBy;delete u.billedAt;delete u.processedAt;
+    dbSet(ref(db,`orders/${orderId}`),u);
+  };
+  // sendTobilling: splits order — fulfilled/partial/NA items billed, remaining qty of partials + pending items become new pending-order
+  const sendTobilling=orderId=>{
+    const order=orders.find(o=>o.id===orderId);if(!order)return;
+    // Billed side: only fulfilled + partial (at sent qty). N/A and pending excluded.
+  const billedSections=order.sections.map(sec=>({...sec,items:sec.items
+    .filter(i=>i.status==="fulfilled"||i.status==="partial")
+    .map(i=>i.status==="partial"?{...i,origQty:i.qty}:i)
+  })).filter(s=>s.items.length>0);
+    // Pending side: unhandled items PLUS remainder of partial items
+    const newPendingItems=secs=>{
+      const items=[];
+      secs.forEach(sec=>{
+        const pendingItems=sec.items
+          .filter(i=>i.status==="pending"||i.status==="unavailable")
+          .map(i=>({...i,status:"pending",handledBy:null,note:""}));
+        const partialRemainders=sec.items
+          .filter(i=>i.status==="partial"&&i.origQty-i.qty>0)
+          .map(i=>({...i,id:Date.now()+Math.random(),origQty:i.origQty-i.qty,qty:i.origQty-i.qty,status:"pending",handledBy:null,note:`${i.origQty-i.qty} remaining (${i.qty} of ${i.origQty} sent in ${orderId})`}));
+        items.push(...pendingItems,...partialRemainders);
+      });
+      return items;
+    };
+    const pendingSections=order.sections.map(sec=>({...sec,items:newPendingItems([sec])})).filter(s=>s.items.length>0);
+    // Update current order to billed
+    // If nothing to bill, skip billed order entirely
+    if(billedSections.length>0){
+      const billedOrder={...order,sections:billedSections,status:"billed",billedBy:actorName,billedAt:nowTime()};
+      dbSet(ref(db,`orders/${orderId}`),billedOrder);
+    } else {
+      dbRemove(ref(db,`orders/${orderId}`));
+    }
+    // Create new pending-order for remainder
+    if(pendingSections.length>0){
+      const newId=genId();
+      const newOrder={id:newId,date:TODAY,scannedAt:nowDateTime(),createdAt:Date.now(),status:"pending-order",notes:(order.notes?order.notes+" · ":"")+"Pending from "+orderId,sections:pendingSections};
+      dbSet(ref(db,`orders/${newId}`),newOrder);
+    }
+  };
+  const addOrder=order=>dbSet(ref(db,`orders/${order.id}`),order);
+  const deleteOrder=orderId=>dbRemove(ref(db,`orders/${orderId}`));
+  // moveSkuToLive: pull one item (sIdx/iIdx) out of a pending-order into a new live order.
+  // If the source order has only that one item total, just flip the whole order to live (no split).
+  const moveSkuToLive=(orderId,sIdx,iIdx)=>{
+    const order=orders.find(o=>o.id===orderId);if(!order)return;
+    const totalItems=order.sections.reduce((n,s)=>n+s.items.length,0);
+    const srcSec=order.sections[sIdx];const movedItem=srcSec?.items?.[iIdx];if(!movedItem)return;
+    if(totalItems<=1){
+      // Single item — just convert the order to live
+      const u=cl(order);
+      u.status="live";delete u.billedBy;delete u.billedAt;delete u.processedAt;
+      u.sections=u.sections.map(sec=>({...sec,items:sec.items.map(it=>({...it,status:"pending",handledBy:null}))}));
+      dbSet(ref(db,`orders/${orderId}`),u);
+      return;
+    }
+    // Split: remove the moved item from the source pending-order
+    const remaining=cl(order);
+    remaining.sections=remaining.sections
+      .map((sec,si)=>si===sIdx?{...sec,items:sec.items.filter((_,ii)=>ii!==iIdx)}:sec)
+      .filter(sec=>sec.items.length>0);
+    dbSet(ref(db,`orders/${orderId}`),remaining);
+    // Create a new live order for just the moved item (single buyer = source section)
+    const newId=genId();
+    const newOrder={
+      id:newId,date:TODAY,scannedAt:nowDateTime(),createdAt:Date.now(),status:"live",
+      notes:(order.notes?order.notes+" · ":"")+"Moved from "+orderId,
+      sections:[{...srcSec,items:[{...movedItem,id:Date.now(),status:"pending",handledBy:null}]}]
+    };
+    dbSet(ref(db,`orders/${newId}`),newOrder);
+  };
+  const updateUser=(action,payload)=>{
+    if(action==="add")dbSet(ref(db,`users/${payload.id}`),payload);
+    if(action==="toggle"){const user=users.find(u=>u.id===payload);if(user)dbSet(ref(db,`users/${payload}`),{...user,active:!user.active});}
+    if(action==="edit")dbSet(ref(db,`users/${payload.id}`),payload);
+    if(action==="delete")dbRemove(ref(db,`users/${payload}`));
+  };
+  const onSkuChange=(action,payload)=>{
+    if(action==="add"){const key=payload.id.replace(/[^a-zA-Z0-9]/g,"_");dbSet(ref(db,`skus/${key}`),payload);}
+    if(action==="delete"){const key=payload.replace(/[^a-zA-Z0-9]/g,"_");dbRemove(ref(db,`skus/${key}`));}
+    if(action==="setRate"){const key=payload.skuId.replace(/[^a-zA-Z0-9]/g,"_");const sku=skuList.find(s=>s.id===payload.skuId);if(sku)dbSet(ref(db,`skus/${key}`),{...sku,rate:payload.rate});}
+    if(action==="setCatRate"){const cat=catList.find(c=>c.id===payload.catId);if(cat)dbSet(ref(db,`categories/${payload.catId}`),{...cat,rate:payload.rate});}
+  };
+  const onBuyerChange=(action,payload)=>{
+    if(action==="add")dbSet(ref(db,`buyers/${payload.id}`),payload);
+    if(action==="edit")dbSet(ref(db,`buyers/${payload.id}`),payload);
+    if(action==="delete")dbRemove(ref(db,`buyers/${payload}`));
+  };
+  const onBuyerGroupChange=(action,payload)=>{
+    if(action==="add")dbSet(ref(db,`buyerGroups/${payload.id}`),payload);
+    if(action==="edit")dbSet(ref(db,`buyerGroups/${payload.id}`),payload);
+    if(action==="delete")dbRemove(ref(db,`buyerGroups/${payload}`));
+  };
+  // Party-wise rate write. Blank/null ⇒ remove (revert to default); else store absolute number.
+  const setPartyRate=(buyerId,skuCode,rate)=>{
+    if(buyerId==null||skuCode==null)return;
+    const key=String(skuCode).replace(/[^a-zA-Z0-9]/g,"_");
+    const path=`partyRates/${buyerId}/skus/${key}`;
+    if(rate==null||rate==="")dbRemove(ref(db,path));
+    else dbSet(ref(db,path),Number(rate)||0);
+  };
+  // Per-folder overall discount → partyRates/{b}/folders/{folder}/disc = {mode:'pct'|'flat',value}.
+  const setFolderRate=(buyerId,folderId,disc)=>{
+    if(buyerId==null||folderId==null)return;
+    const path=`partyRates/${buyerId}/folders/${folderId}/disc`;
+    if(!disc||disc.value===""||disc.value==null)dbRemove(ref(db,path));
+    else dbSet(ref(db,path),{mode:disc.mode==="flat"?"flat":"pct",value:Number(disc.value)||0});
+  };
+  // Per-series party rate → partyRates/{b}/folders/{folder}/series/{sid} = {mode:'abs'|'pct'|'flat',value}.
+  const setSeriesPartyRate=(buyerId,folderId,seriesId,r)=>{
+    if(buyerId==null||folderId==null||seriesId==null)return;
+    const path=`partyRates/${buyerId}/folders/${folderId}/series/${seriesId}`;
+    if(!r||r.value===""||r.value==null)dbRemove(ref(db,path));
+    else dbSet(ref(db,path),{mode:["abs","flat","pct"].includes(r.mode)?r.mode:"abs",value:Number(r.value)||0});
+  };
+  // Owner-editable master list rate per series → categories/{folder}/series/{sid}/rate.
+  const setSeriesListRate=(folderId,seriesId,rate)=>{
+    if(folderId==null||seriesId==null)return;
+    dbSet(ref(db,`categories/${folderId}/series/${seriesId}/rate`),rate===""||rate==null?null:(Number(rate)||0));
+  };
+
+  const addAlias=(buyer,rawText)=>{
+    if(!buyer||!buyer.id||!rawText)return;
+    const trimmed=rawText.trim();
+    const existing=(buyer.aliases||[]);
+    if(existing.includes(trimmed))return;
+    const updated={...buyer,aliases:[...existing,trimmed]};
+    dbSet(ref(db,`buyers/${buyer.id}`),updated);
+  };
+
+  const updateAdminPassword=(pw)=>dbSet(ref(db,"settings/adminPassword"),String(pw));
+  const updateOwnerPassword=(pw)=>dbSet(ref(db,"settings/ownerPassword"),String(pw));
+
+  if(loading)return <div style={{minHeight:620,background:"#fff",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
+    <div style={{fontFamily:C.mono,fontWeight:700,fontSize:20,color:C.amber}}>ORDER<span style={{color:C.gray}}>FLOW</span></div>
+    <div style={{fontSize:13,color:C.textDim}}>Connecting…</div>
+  </div>;
+
+  if(pendingAuth&&pendingAuth.type==="admin")return <PasswordGate title="ADMIN" expected={adminPassword} onSuccess={()=>{setPendingAuth(null);setScreen("admin-app");}} onBack={()=>setPendingAuth(null)}/>;
+  if(pendingAuth&&pendingAuth.type==="owner")return <PasswordGate title="CLIENT RATES" expected={ownerPassword} onSuccess={()=>{setPendingAuth(null);setScreen("owner-app");}} onBack={()=>setPendingAuth(null)}/>;
+  if(pendingAuth&&pendingAuth.type==="staff")return <PasswordGate title={pendingAuth.user.name} expected={pendingAuth.user.password||"6666"} onSuccess={()=>{setStaffId(pendingAuth.user.id);setPendingAuth(null);setScreen("staff-app");}} onBack={()=>setPendingAuth(null)}/>;
+  if(screen==="choose")return <ChooseScreen onStaff={()=>setScreen("staff-select")} onAdmin={()=>setPendingAuth({type:"admin"})} onOwner={()=>setPendingAuth({type:"owner"})} lang={lang} setLang={setLang}/>;
+  if(screen==="staff-select")return <StaffSelect users={users} onSelect={id=>{const u=users.find(x=>x.id===id);setPendingAuth({type:"staff",user:u});}} onBack={()=>setScreen("choose")} lang={lang}/>;
+  if(screen==="staff-scan")return <ScanScreen actorName={actorName} onBack={()=>setScreen("staff-app")} onConfirm={o=>{addOrder(o);setScreen("staff-app");}} skuList={enrichedSkuList} catList={catList} buyerList={buyerList} onAddAlias={addAlias} lang={lang} setLang={setLang}/>;
+  if(screen==="staff-app"){
+    if(activeOrder)return <OrderDetail order={activeOrder} actorName={actorName} isAdmin={false} onBack={()=>setActiveOrderId(null)} onUpdate={(sIdx,iIdx,changes)=>updateItem(activeOrder.id,sIdx,iIdx,changes)} onBilled={()=>{billOrder(activeOrder.id);setActiveOrderId(null);}} onReopen={()=>reopenOrder(activeOrder.id)} onProcess={()=>processOrder(activeOrder.id)} onSendToBilling={()=>{sendTobilling(activeOrder.id);setActiveOrderId(null);}} skuList={enrichedSkuList} catList={catList} lang={lang} setLang={setLang} buyerList={buyerList} partyRates={partyRates} onSetPartyRate={setPartyRate} onSetSeriesPartyRate={setSeriesPartyRate}/>;
+    return <StaffHome orders={orders} staffName={actorName} onSignOut={()=>{setStaffId(null);setScreen("choose");}} onNewOrder={()=>setScreen("staff-scan")} onOpenOrder={id=>setActiveOrderId(id)} onEditOrder={id=>{setActiveOrderId(id);}} onReopenOrder={id=>reopenOrder(id)} onItemUpdate={(orderId,sIdx,iIdx,changes)=>updateItem(orderId,sIdx,iIdx,changes)} onMoveToLive={moveSkuToLive} lang={lang} setLang={setLang} buyerList={buyerList} skuList={enrichedSkuList} catList={catList}/>;
+  }
+  if(screen==="admin-app")return <AdminApp orders={orders} users={users} skuList={skuList} catList={catList} onSignOut={()=>setScreen("choose")} onOrderUpdate={updateItem} onOrderBilled={billOrder} onOrderReopen={reopenOrder} onOrderProcess={processOrder} onOrderSendToBilling={sendTobilling} onAddOrder={addOrder} onUserChange={updateUser} onDeleteOrder={deleteOrder} onSkuChange={onSkuChange} skuListEnriched={enrichedSkuList} buyerList={buyerList} onBuyerChange={onBuyerChange} buyerGroups={buyerGroups} onBuyerGroupChange={onBuyerGroupChange} onAddAlias={addAlias} adminPassword={adminPassword} onAdminPasswordChange={updateAdminPassword} onMoveToLive={moveSkuToLive} partyRates={partyRates} onSetPartyRate={setPartyRate} onSetSeriesPartyRate={setSeriesPartyRate}/>;
+  if(screen==="owner-app")return <OwnerApp buyerList={buyerList} catList={catList} skuList={enrichedSkuList} orders={orders} partyRates={partyRates} onSetFolderRate={setFolderRate} onSetSeriesPartyRate={setSeriesPartyRate} onSetSeriesListRate={setSeriesListRate} onBuyerChange={onBuyerChange} ownerPassword={ownerPassword} onOwnerPasswordChange={updateOwnerPassword} onSignOut={()=>setScreen("choose")}/>;
+  return null;
+}
